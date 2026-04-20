@@ -1,0 +1,56 @@
+# Whisper — Gossip Engine Release
+# Triggered on version tags (v*). Runs quality checks and creates a GitHub Release.
+# Whisper is a Go library — no binaries to build.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.25.0'
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.2
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race -count=1 -timeout=5m ./...
+
+      - name: Test coverage
+        run: |
+          go test -coverprofile=coverage.out -timeout=5m ./...
+          go tool cover -func=coverage.out | tail -1
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  release:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

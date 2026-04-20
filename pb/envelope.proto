@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package whisper.v1;
+
+option go_package = "github.com/bbmumford/whisper/pb";
+
+// GossipEnvelope is the wire format for gossip exchanges.
+// The records field carries opaque serialised payloads — the gossip engine
+// does not know or care about record structure. Each consumer defines its
+// own record proto.
+message GossipEnvelope {
+    ExchangeMeta meta = 1;
+    string topic = 2;                // topic name
+    TopicMode mode = 3;              // broadcast, stateful, request_response
+    repeated bytes records = 4;      // opaque serialised payloads (consumer-defined proto)
+}
+
+// ExchangeMeta carries per-exchange metadata piggybacked on gossip frames.
+message ExchangeMeta {
+    uint64 cache_fingerprint = 1;
+    string region = 2;
+    bool backpressure_signal = 3;
+    uint64 hlc_watermark = 4;        // for delta sync
+    bytes peer_id = 5;
+    uint64 timestamp = 6;
+
+    // PEX entries piggybacked on gossip
+    repeated PEXEntry pex_entries = 7;
+
+    // Connection counts for load balancing
+    map<string, int32> connection_counts = 8;
+
+    // Connection offer for NAT traversal signaling
+    ConnectionOffer offer = 9;
+}
+
+// TopicMode identifies the gossip semantics for a topic.
+enum TopicMode {
+    TOPIC_BROADCAST = 0;
+    TOPIC_STATEFUL = 1;
+    TOPIC_REQUEST_RESPONSE = 2;
+}
+
+// PEXEntry is a signed peer exchange advertisement.
+message PEXEntry {
+    string node_id = 1;
+    repeated string addresses = 2;
+    int64 timestamp_unix = 3;
+    bytes signature = 4;
+}
+
+// ConnectionOffer signals desire for a direct connection.
+message ConnectionOffer {
+    string from_node_id = 1;
+    string to_node_id = 2;
+    repeated string addresses = 3;
+    string transport = 4;
+    int64 timestamp_unix = 5;
+    bytes signature = 6;
+}
