@@ -124,12 +124,22 @@ func TestAdaptiveIntervalGrowsUnderBackpressure(t *testing.T) {
 	if a.Current() != 60*time.Second {
 		t.Fatalf("expected interval to saturate at max=60s, got %v", a.Current())
 	}
-	// No backpressure → unchanged.
+	// No backpressure → unchanged underlying state (Current reads the
+	// stored unjittered base; the return is a jittered sample around it
+	// per 2A in the mesh-stabilization plan).
 	a = NewAdaptiveInterval(10*time.Second, 2*time.Second, 60*time.Second)
 	before := a.Current()
 	after := a.ApplyBackpressure(false)
-	if before != after {
-		t.Fatalf("expected no change without backpressure, %v → %v", before, after)
+	if a.Current() != before {
+		t.Fatalf("Current() changed without backpressure: %v → %v", before, a.Current())
+	}
+	// The returned value is jittered — must be within [before·(1-JitterFraction),
+	// before·(1+JitterFraction)]. Verifies jitter didn't escape its bounds.
+	lo := time.Duration(float64(before) * (1 - JitterFraction))
+	hi := time.Duration(float64(before) * (1 + JitterFraction))
+	if after < lo || after > hi {
+		t.Fatalf("ApplyBackpressure(false) jitter out of bounds: base=%v got=%v [%v, %v]",
+			before, after, lo, hi)
 	}
 }
 

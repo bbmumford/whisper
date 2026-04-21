@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net"
 	"sync"
@@ -354,8 +355,11 @@ func (rp *RumorPusher) pushRumorInternal(payload []byte, hopCount uint8, fromDim
 		// All hypercube neighbors dead — fall through to random
 	}
 
-	// Random fallback (origin push or degraded hypercube)
-	targets := selectRandomPeers(peers, rp.tracker.config.Fanout)
+	// Random fallback (origin push or degraded hypercube). Fanout scales
+	// with peer count (2B — adaptiveFanout = max(log2(N), configured base))
+	// so large fleets keep probabilistic coverage without fanning out to
+	// every peer.
+	targets := selectRandomPeers(peers, adaptiveFanout(len(peers), rp.tracker.config.Fanout))
 	for _, peer := range targets {
 		if err := peer.WriteRumor(payload, hopCount+1, 0xFF); err != nil {
 			dbgRumor.Printf("Random send failed: %v", err)
@@ -390,6 +394,34 @@ func selectRandomPeers(peers map[string]RumorPeerConn, n int) []RumorPeerConn {
 		result[i] = peers[keys[i]]
 	}
 	return result
+}
+
+// adaptiveFanout returns the random-peer fanout for the current peer
+// count (2B). Scales with log2(N) above the configured base so a large
+// fleet still gets probabilistic coverage without spamming every peer,
+// while a small fleet keeps the configured minimum. Examples with
+// baseFanout=3:
+//   - 4 peers:    max(log2(4)=2,  3) = 3
+//   - 16 peers:   max(log2(16)=4, 3) = 4
+//   - 100 peers:  max(log2(100)=6, 3) = 6
+//   - 1000 peers: max(log2(1000)=9, 3) = 9
+//
+// Hypercube routing already gives structured coverage and is naturally
+// logarithmic in dimensions — this applies to the random-fallback path
+// only, which used to cap at the static baseFanout regardless of fleet
+// size.
+func adaptiveFanout(peerCount, baseFanout int) int {
+	if peerCount <= 0 {
+		return 0
+	}
+	f := int(math.Log2(float64(peerCount)))
+	if f < baseFanout {
+		f = baseFanout
+	}
+	if f > peerCount {
+		f = peerCount
+	}
+	return f
 }
 
 // HandleRumorFrame processes an incoming G3 rumor frame in the responder.

@@ -5,8 +5,22 @@
 package whisper
 
 import (
+	"math/rand/v2"
 	"time"
 )
+
+// JitterFraction is the ±fraction applied to each computed gossip
+// interval to desynchronise peers that came up together. Without this a
+// fleet-restart produces synchronised gossip cycles every 10 s, which
+// spikes cross-region egress at the same wall-clock boundary for every
+// peer. ±15% spreads the spike over ~1.5 s without changing the
+// effective rate.
+//
+// Applied in Next() after the base/idle/convergence arithmetic picks the
+// unjittered value; also applied in ApplyBackpressure() so an overloaded
+// fleet doesn't all back off in lockstep. Uses math/rand/v2 so the
+// randomness is goroutine-safe without an explicit seed.
+const JitterFraction = 0.15
 
 // AdaptiveInterval adjusts gossip exchange timing based on exchange results.
 // When records are applied (convergence), interval snaps to min (2s).
@@ -58,6 +72,10 @@ func NewAdaptiveInterval(base, min, max time.Duration) *AdaptiveInterval {
 }
 
 // Next returns the interval for the next exchange based on the last result.
+// The returned interval includes ±JitterFraction randomisation so peers
+// that came up together don't produce synchronised gossip bursts. The
+// stored a.current is the UNJITTERED value; jitter is applied per-call
+// so every call to Next() returns a fresh jittered sample around it.
 func (a *AdaptiveInterval) Next(result GossipResult) time.Duration {
 	if result.RecordsApplied > 0 {
 		// Active convergence — accelerate to min
@@ -81,15 +99,35 @@ func (a *AdaptiveInterval) Next(result GossipResult) time.Duration {
 		a.fingerprint = result.PeerMeta.CacheFingerprint
 	}
 
-	return a.current
+	return jitter(a.current)
+}
+
+// jitter returns d scaled by a uniform random factor in
+// [1-JitterFraction, 1+JitterFraction]. Separated out for testability —
+// 100 000 calls should have mean ≈ d and stddev proportional to
+// JitterFraction. Always returns ≥ 1 (avoids ticker panics on 0 or
+// negative durations).
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	// rand.Float64 is in [0, 1); map to [-JitterFraction, +JitterFraction]
+	scale := 1.0 + JitterFraction*(2*rand.Float64()-1)
+	out := time.Duration(float64(d) * scale)
+	if out < 1 {
+		return 1
+	}
+	return out
 }
 
 // ApplyBackpressure grows the adaptive interval when global backpressure is
 // active. Called by the engine between exchanges so over-subscribed nodes
-// slow their G1 cycles until load clears.
+// slow their G1 cycles until load clears. Returns the jittered sample
+// around the backpressured base for the same reason Next() does: prevent
+// an overloaded fleet from all backing off in lockstep.
 func (a *AdaptiveInterval) ApplyBackpressure(overloaded bool) time.Duration {
 	if !overloaded {
-		return a.current
+		return jitter(a.current)
 	}
 	next := a.current * 2
 	if next < a.base*2 {
@@ -99,7 +137,7 @@ func (a *AdaptiveInterval) ApplyBackpressure(overloaded bool) time.Duration {
 		next = a.max
 	}
 	a.current = next
-	return a.current
+	return jitter(a.current)
 }
 
 // Current returns the most recently computed interval.
