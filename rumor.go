@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -174,6 +175,54 @@ type RumorPusher struct {
 	cube     *Hypercube               // structured overlay (nil until initialized)
 	inbound  chan RumorMessage
 	rumorIDFn RumorIDFunc // consumer-provided dedup key generator
+
+	// Observability counters — lock-free. Call sites increment them via
+	// atomic ops; Stats() reads them for a snapshot.
+	//   - notified: total NotifyNewPayload calls (includes duplicates)
+	//   - deduped:  rumors skipped by the tracker (already seen)
+	//   - queueFull:NotifyNewPayload drops (inbound channel saturated)
+	//   - pushesHypercube: rumor writes that went via the hypercube overlay
+	//   - pushesRandom:    rumor writes that went via random-peer fallback
+	//   - writeErrors:     RumorPeerConn.WriteRumor failures
+	notified         atomic.Uint64
+	deduped          atomic.Uint64
+	queueFull        atomic.Uint64
+	pushesHypercube  atomic.Uint64
+	pushesRandom     atomic.Uint64
+	writeErrors      atomic.Uint64
+}
+
+// RumorStats is a point-in-time snapshot of rumor-push effectiveness.
+type RumorStats struct {
+	Notified        uint64 // NotifyNewPayload calls
+	Deduped         uint64 // skipped because already-seen
+	QueueFull       uint64 // notifies dropped because inbound channel full
+	PushesHypercube uint64 // frame writes via hypercube overlay
+	PushesRandom    uint64 // frame writes via random-peer fallback
+	WriteErrors     uint64 // peer.WriteRumor failures
+	Peers           int    // current peer count (RegisterPeer − UnregisterPeer)
+	SeenCache       int    // current size of the tracker's seen map
+}
+
+// Stats returns a snapshot of rumor-push effectiveness. Cheap:
+// atomic reads for counters + one RLock for peer/cache sizes.
+func (rp *RumorPusher) Stats() RumorStats {
+	rp.mu.RLock()
+	peerCount := len(rp.peers)
+	rp.mu.RUnlock()
+	rp.tracker.mu.Lock()
+	seenCount := len(rp.tracker.seen)
+	rp.tracker.mu.Unlock()
+	return RumorStats{
+		Notified:        rp.notified.Load(),
+		Deduped:         rp.deduped.Load(),
+		QueueFull:       rp.queueFull.Load(),
+		PushesHypercube: rp.pushesHypercube.Load(),
+		PushesRandom:    rp.pushesRandom.Load(),
+		WriteErrors:     rp.writeErrors.Load(),
+		Peers:           peerCount,
+		SeenCache:       seenCount,
+	}
 }
 
 // RumorMessage is a payload with its dedup key, queued for push.
@@ -224,11 +273,13 @@ func (rp *RumorPusher) SetHypercube(cube *Hypercube) {
 
 // NotifyNewPayload queues an opaque payload for rumor push (non-blocking).
 func (rp *RumorPusher) NotifyNewPayload(payload []byte) {
+	rp.notified.Add(1)
 	id := rp.rumorIDFn(payload)
 	select {
 	case rp.inbound <- RumorMessage{ID: id, Payload: payload}:
 	default:
 		// Channel full — drop, gossip tick catches it
+		rp.queueFull.Add(1)
 	}
 }
 
@@ -240,6 +291,7 @@ func (rp *RumorPusher) Run(ctx context.Context) {
 			return
 		case msg := <-rp.inbound:
 			if rp.tracker.IsSeen(msg.ID) {
+				rp.deduped.Add(1)
 				continue
 			}
 			rp.tracker.MarkSeen(msg.ID)
@@ -287,8 +339,10 @@ func (rp *RumorPusher) pushRumorInternal(payload []byte, hopCount uint8, fromDim
 			if peer, ok := peers[neighbor]; ok {
 				if err := peer.WriteRumor(payload, hopCount+1, uint8(d)); err != nil {
 					dbgRumor.Printf("Hypercube send to %s dim %d failed: %v", neighbor, d, err)
+					rp.writeErrors.Add(1)
 				} else {
 					sent++
+					rp.pushesHypercube.Add(1)
 				}
 				delete(peers, neighbor) // don't double-send via random
 			}
@@ -305,6 +359,9 @@ func (rp *RumorPusher) pushRumorInternal(payload []byte, hopCount uint8, fromDim
 	for _, peer := range targets {
 		if err := peer.WriteRumor(payload, hopCount+1, 0xFF); err != nil {
 			dbgRumor.Printf("Random send failed: %v", err)
+			rp.writeErrors.Add(1)
+		} else {
+			rp.pushesRandom.Add(1)
 		}
 	}
 	if len(targets) > 0 {

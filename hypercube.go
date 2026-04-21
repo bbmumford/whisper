@@ -108,6 +108,9 @@ func (h *Hypercube) Neighbors() []string {
 }
 
 // DimensionNeighbor returns the neighbor in a specific dimension, or "" if none.
+// Fully bounds-checked: rejects negative d, d ≥ dimension, selfPos < 0, and
+// the neighbor-position-exceeds-members case that arises when member count
+// is not a power of 2. Safe to call with any int from any source.
 func (h *Hypercube) DimensionNeighbor(d int) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -115,11 +118,34 @@ func (h *Hypercube) DimensionNeighbor(d int) string {
 	if h.selfPos < 0 || d >= h.dimension || d < 0 {
 		return ""
 	}
+	// Additional safeguard against malformed rebuild state: if the shift
+	// overflowed int width (d near 63) or members list shrank between
+	// RouteRumor's enumeration and our lookup, refuse rather than panic.
+	if d >= 63 {
+		return ""
+	}
 	pos := h.selfPos ^ (1 << d)
-	if pos >= len(h.members) {
+	if pos < 0 || pos >= len(h.members) {
 		return "" // non-power-of-2: this dimension has no neighbor
 	}
 	return h.members[pos]
+}
+
+// Valid reports whether this hypercube has usable state (self is a
+// member, dimension is consistent with the members list). Intended for
+// pre-flight checks by callers that loop over dimensions — a single
+// Valid call amortises what would otherwise be repeated bounds checks.
+func (h *Hypercube) Valid() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.selfPos < 0 || h.dimension <= 0 || h.dimension >= 63 {
+		return false
+	}
+	// dimension should satisfy 2^(dimension-1) ≤ len(members) ≤ 2^dimension
+	if 1<<(h.dimension-1) > len(h.members) {
+		return false
+	}
+	return true
 }
 
 // RouteRumor returns the dimensions to forward on based on dimension-ordered routing.

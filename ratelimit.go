@@ -290,6 +290,31 @@ func (r *RateLimiter) QueueDepth() int {
 	return r.queueDepth
 }
 
+// QueueThreshold returns the current overload threshold. Useful for
+// dashboards showing headroom (depth vs threshold) and for operator
+// validation after startup.
+func (r *RateLimiter) QueueThreshold() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.queueThreshold
+}
+
+// SetQueueThreshold adjusts the overload threshold at runtime. Values ≤ 0
+// are ignored (keeps previous value). Intended for operator tuning via a
+// diagnostics endpoint — e.g. temporarily raise the threshold during a
+// known convergence storm without bouncing the process.
+func (r *RateLimiter) SetQueueThreshold(n int) {
+	if r == nil || n <= 0 {
+		return
+	}
+	r.mu.Lock()
+	r.queueThreshold = n
+	r.mu.Unlock()
+}
+
 // PeerCount returns the number of peers currently tracked.
 func (r *RateLimiter) PeerCount() int {
 	if r == nil {

@@ -393,6 +393,76 @@ func (e *Engine) Backpressure() *BackpressureMonitor { return e.backpressure }
 // RTT returns the RTT measurer.
 func (e *Engine) RTT() *NetworkRTTMeasurer { return e.rtt }
 
+// EngineStats aggregates observable state from all attached subsystems.
+// Nil fields correspond to subsystems not wired on this engine.
+type EngineStats struct {
+	Topics          int             // registered topic count
+	Subscribers     int             // total subscribers across topics
+	Adaptive        *AdaptiveStats  // current interval + idle counter
+	Backpressure    bool            // currently overloaded?
+	PendingExchange int             // current pendingExchanges on backpressure monitor
+	Rumor           *RumorStats     // rumor-push effectiveness
+	RateLimiter     *RateLimitStats // queue depth, threshold, peer count
+	RTT             time.Duration   // recent avg RTT from NetworkRTTMeasurer (0 if unmeasured)
+	HypercubeValid  bool            // hypercube has usable state
+	HypercubeDim    int             // current hypercube dimension
+}
+
+// RateLimitStats is an inlined view of RateLimiter state for EngineStats.
+type RateLimitStats struct {
+	QueueDepth     int
+	QueueThreshold int
+	Peers          int
+	Overloaded     bool
+}
+
+// Stats returns a snapshot of aggregate engine state. Cheap — one atomic
+// read per subsystem + a few locks. Intended for diagnostics endpoints
+// (e.g. /api/monitoring/mesh-debug) that want a single call instead of
+// pulling from each subsystem individually.
+func (e *Engine) Stats() EngineStats {
+	out := EngineStats{}
+
+	e.mu.RLock()
+	out.Topics = 0
+	if e.registry != nil {
+		out.Topics = e.registry.Count()
+	}
+	for _, subs := range e.subscribers {
+		out.Subscribers += len(subs)
+	}
+	e.mu.RUnlock()
+
+	if e.adaptive != nil {
+		s := e.adaptive.Stats()
+		out.Adaptive = &s
+	}
+	if e.backpressure != nil {
+		out.Backpressure = e.backpressure.IsOverloaded()
+		out.PendingExchange = e.backpressure.Pending()
+	}
+	if e.rumor != nil {
+		s := e.rumor.Stats()
+		out.Rumor = &s
+	}
+	if e.rateLimiter != nil {
+		out.RateLimiter = &RateLimitStats{
+			QueueDepth:     e.rateLimiter.QueueDepth(),
+			QueueThreshold: e.rateLimiter.QueueThreshold(),
+			Peers:          e.rateLimiter.PeerCount(),
+			Overloaded:     e.rateLimiter.Overloaded(),
+		}
+	}
+	if e.rtt != nil {
+		out.RTT = e.rtt.AvgRTT()
+	}
+	if e.hypercube != nil {
+		out.HypercubeValid = e.hypercube.Valid()
+		out.HypercubeDim = e.hypercube.Dimension()
+	}
+	return out
+}
+
 // isFatalError returns true for errors that mean the connection is dead.
 func isFatalError(err error) bool {
 	if err == nil {
