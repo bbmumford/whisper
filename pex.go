@@ -120,6 +120,16 @@ func (rl *PEXRateLimiter) Allow(peerNodeID string) bool {
 	return true
 }
 
+// Forget removes a peer's rate-limit state. Called from
+// PEXManager.RemovePeer so a disconnected peer's lastSend entry doesn't
+// linger (otherwise it only clears via age-based prune, which ignores
+// stale peer identity). Safe no-op if the peer is unknown.
+func (rl *PEXRateLimiter) Forget(peerNodeID string) {
+	rl.mu.Lock()
+	delete(rl.lastSend, peerNodeID)
+	rl.mu.Unlock()
+}
+
 // pruneRateLimiter evicts entries older than 2x interval, and enforces a hard cap.
 // Must be called with mu held.
 func (rl *PEXRateLimiter) pruneRateLimiter() {
@@ -181,6 +191,21 @@ func (m *PEXManager) RefreshLocalEntry(nodeID string, addresses []string, region
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.localEntry = SignPEXEntry(nodeID, addresses, region, m.privateKey)
+}
+
+// RemovePeer drops a disconnected peer's state — both the known-peers
+// entry AND the rate-limiter entry. Previously only known-peers was
+// touched (via pruneKnownPeers' age-based cleanup), leaving the
+// rate-limiter's lastSend map with a stale entry that only timed out
+// after 2× PEXInterval. Call this from the ConnectionManager teardown
+// path so PEX state tracks peer lifecycle exactly.
+func (m *PEXManager) RemovePeer(peerNodeID string) {
+	m.mu.Lock()
+	delete(m.knownPeers, peerNodeID)
+	m.mu.Unlock()
+	if m.rateLimiter != nil {
+		m.rateLimiter.Forget(peerNodeID)
+	}
 }
 
 // BuildPEXEntries returns up to PEXMaxEntriesPerExchange entries to piggyback

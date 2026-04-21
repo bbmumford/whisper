@@ -16,12 +16,18 @@ import (
 //
 // Stateless — reads only GossipResult fields, no direct state store dependency.
 type AdaptiveInterval struct {
-	base        time.Duration // default interval (e.g. 10s)
-	min         time.Duration // fastest (e.g. 2s during convergence)
-	max         time.Duration // slowest (e.g. 60s when idle)
-	current     time.Duration
-	consecutive int    // consecutive no-change exchanges
-	fingerprint uint64 // last known cache fingerprint
+	base    time.Duration // default interval (e.g. 10s)
+	min     time.Duration // fastest (e.g. 2s during convergence)
+	max     time.Duration // slowest (e.g. 60s when idle)
+	current time.Duration
+	// idleExchanges is incremented each time the peer fingerprint matches
+	// ours (both caches in sync) and reset whenever we see records applied
+	// or records sent. It drives the exponential backoff — the "nothing
+	// has changed on either side for N cycles" signal. Formerly named
+	// `consecutive`; renamed for clarity since "consecutive what?" wasn't
+	// obvious from the field name alone.
+	idleExchanges int
+	fingerprint   uint64 // last known cache fingerprint
 }
 
 // NewAdaptiveInterval creates an adaptive interval with the given bounds.
@@ -55,19 +61,19 @@ func NewAdaptiveInterval(base, min, max time.Duration) *AdaptiveInterval {
 func (a *AdaptiveInterval) Next(result GossipResult) time.Duration {
 	if result.RecordsApplied > 0 {
 		// Active convergence — accelerate to min
-		a.consecutive = 0
+		a.idleExchanges = 0
 		a.current = a.min
 	} else if result.PeerMeta != nil && result.PeerMeta.CacheFingerprint != 0 &&
 		result.PeerMeta.CacheFingerprint == a.fingerprint {
 		// Caches match, nothing changed — back off exponentially
-		a.consecutive++
+		a.idleExchanges++
 		a.current = a.current * 2
 		if a.current > a.max {
 			a.current = a.max
 		}
 	} else {
 		// Records sent but none applied (peer already had them) — moderate
-		a.consecutive = 0
+		a.idleExchanges = 0
 		a.current = a.base
 	}
 
@@ -99,4 +105,26 @@ func (a *AdaptiveInterval) ApplyBackpressure(overloaded bool) time.Duration {
 // Current returns the most recently computed interval.
 func (a *AdaptiveInterval) Current() time.Duration {
 	return a.current
+}
+
+// AdaptiveStats is a point-in-time snapshot of adaptive-interval state.
+type AdaptiveStats struct {
+	Current       time.Duration // most recently computed interval
+	Base          time.Duration
+	Min           time.Duration
+	Max           time.Duration
+	IdleExchanges int    // consecutive exchanges with matching fingerprint
+	Fingerprint   uint64 // last peer-cache fingerprint seen
+}
+
+// Stats returns a snapshot for metrics / diagnostics.
+func (a *AdaptiveInterval) Stats() AdaptiveStats {
+	return AdaptiveStats{
+		Current:       a.current,
+		Base:          a.base,
+		Min:           a.min,
+		Max:           a.max,
+		IdleExchanges: a.idleExchanges,
+		Fingerprint:   a.fingerprint,
+	}
 }
