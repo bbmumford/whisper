@@ -298,26 +298,42 @@ func (e *Engine) Run(ctx context.Context, conn net.Conn, peerNodeID string, onEx
 		case <-time.After(interval):
 		}
 
-		// Check backpressure
-		isOverloaded := e.backpressure.Enter()
-		defer e.backpressure.Exit()
+		// Each iteration runs in its own scope so `defer e.backpressure.Exit()`
+		// fires at the end of the iteration instead of accumulating on the
+		// goroutine's defer stack until Run returns. The previous shape
+		// leaked ~96B per cycle and — worse — never decremented
+		// pendingExchanges, so backpressure permanently tripped after
+		// maxPending cycles. A fatal error bubbles out via the fatal flag.
+		var (
+			result    GossipResult
+			fatal     error
+			gotResult bool
+		)
+		func() {
+			isOverloaded := e.backpressure.Enter()
+			defer e.backpressure.Exit()
 
-		// Build exchange metadata
-		meta := &ExchangeMeta{
-			BackpressureSignal: isOverloaded,
-		}
-
-		// Add PEX entries if available
-		if e.pex != nil {
-			meta.PEXEntries = e.pex.BuildPEXEntries(peerNodeID)
-		}
-
-		// Perform the exchange
-		result, err := e.ExchangeFunc(ctx, conn, meta)
-		if err != nil {
-			if isFatalError(err) {
-				return fmt.Errorf("whisper: exchange fatal: %w", err)
+			meta := &ExchangeMeta{
+				BackpressureSignal: isOverloaded,
 			}
+			if e.pex != nil {
+				meta.PEXEntries = e.pex.BuildPEXEntries(peerNodeID)
+			}
+
+			res, err := e.ExchangeFunc(ctx, conn, meta)
+			if err != nil {
+				if isFatalError(err) {
+					fatal = fmt.Errorf("whisper: exchange fatal: %w", err)
+				}
+				return
+			}
+			result = res
+			gotResult = true
+		}()
+		if fatal != nil {
+			return fatal
+		}
+		if !gotResult {
 			continue
 		}
 
