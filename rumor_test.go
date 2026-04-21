@@ -101,3 +101,24 @@ func TestRumorIDUniqueness(t *testing.T) {
 		t.Error("different payloads should produce different IDs")
 	}
 }
+
+// 2B regression: adaptiveFanout scales with log2(N) above a configured
+// minimum floor, and clamps to the peer count when N is smaller.
+func TestAdaptiveFanout_ScalesWithPeerCount(t *testing.T) {
+	cases := []struct {
+		peers, base, want int
+	}{
+		{peers: 0, base: 3, want: 0},    // no peers
+		{peers: 1, base: 3, want: 1},    // 1 peer, clamped
+		{peers: 3, base: 3, want: 3},    // at base floor
+		{peers: 10, base: 3, want: 3},   // log2(10)=3.3 → 3, at floor
+		{peers: 16, base: 3, want: 4},   // log2(16)=4
+		{peers: 100, base: 3, want: 6},  // log2(100)=6.6 → 6
+		{peers: 1024, base: 3, want: 10}, // log2(1024)=10
+	}
+	for _, c := range cases {
+		if got := adaptiveFanout(c.peers, c.base); got != c.want {
+			t.Errorf("adaptiveFanout(%d, %d) = %d, want %d", c.peers, c.base, got, c.want)
+		}
+	}
+}
