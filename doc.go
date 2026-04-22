@@ -6,7 +6,7 @@
 // Package whisper is a generic, topic-based gossip engine for peer-to-peer
 // state propagation. It provides the pub/sub, delta sync, and topology
 // routing layers that sit between a wire protocol (Aether) and application
-// state (Ledger, Hospitium, Mercury).
+// state (Ledger, Minerva, Mercury).
 //
 // Whisper is transport-agnostic — it operates on Aether streams but knows
 // nothing about what it carries.

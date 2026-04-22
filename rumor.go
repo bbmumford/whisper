@@ -5,6 +5,7 @@
 package whisper
 
 import (
+	"container/list"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -26,7 +27,18 @@ import (
 
 const RumorMagic uint16 = 0x4733 // "G3"
 const rumorHeaderSize = 8        // 2 (magic) + 4 (length) + 1 (hop) + 1 (fromDimension)
-const rumorSeenCapacity = 256
+const rumorSeenCapacity = 4096
+
+// MaxRumorPayloadBytes caps the size of a payload admitted into the rumor
+// inbound queue. Oversized payloads are dropped with a warning — they still
+// propagate through the delta (G1) path; rumor fast-push is best-effort and
+// must not pin large slices alive in the bounded inbound channel.
+const MaxRumorPayloadBytes = 256 * 1024
+
+// rumorInboundCapacity bounds the NotifyNewPayload queue. Senders are
+// already fanout-limited, so a small queue is sufficient and keeps the
+// retained-payload worst-case small (capacity * MaxRumorPayloadBytes).
+const rumorInboundCapacity = 16
 
 // RumorConfig configures rumor-mongering behavior.
 type RumorConfig struct {
@@ -61,18 +73,30 @@ func AgentMeshRumorConfig() RumorConfig {
 // must be deterministic for the same payload.
 type RumorIDFunc func(payload []byte) string
 
-// RumorTracker deduplicates rumors using a generation-based LRU.
+// RumorTracker deduplicates rumors using an O(1) LRU. The doubly-linked
+// list orders entries by recency (front = newest, back = oldest); the map
+// provides O(1) lookup into that list. MarkSeen moves an existing entry
+// to the front or pushes a new one; eviction pops from the back.
 type RumorTracker struct {
 	mu       sync.Mutex
-	seen     map[string]int64 // rumorID → timestamp (for eviction)
+	seen     map[string]*list.Element
+	order    *list.List // values are seenEntry
 	config   RumorConfig
 	capacity int
+}
+
+// seenEntry is the list-element value. key is stored so eviction (which
+// pops from the list tail) can remove the corresponding map entry.
+type seenEntry struct {
+	key string
+	ts  int64
 }
 
 // NewRumorTracker creates a tracker with the given config.
 func NewRumorTracker(cfg RumorConfig) *RumorTracker {
 	return &RumorTracker{
-		seen:     make(map[string]int64, rumorSeenCapacity),
+		seen:     make(map[string]*list.Element, rumorSeenCapacity),
+		order:    list.New(),
 		config:   cfg,
 		capacity: rumorSeenCapacity,
 	}
@@ -86,37 +110,35 @@ func (rt *RumorTracker) IsSeen(rumorID string) bool {
 	return ok
 }
 
-// MarkSeen records that this rumor has been processed.
+// MarkSeen records that this rumor has been processed. Existing keys are
+// moved to the front (most-recent); new keys are pushed and the tail is
+// evicted if capacity is exceeded.
 func (rt *RumorTracker) MarkSeen(rumorID string) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	rt.seen[rumorID] = time.Now().UnixNano()
-	if len(rt.seen) > rt.capacity {
+	now := time.Now().UnixNano()
+	if el, ok := rt.seen[rumorID]; ok {
+		el.Value.(*seenEntry).ts = now
+		rt.order.MoveToFront(el)
+		return
+	}
+	el := rt.order.PushFront(&seenEntry{key: rumorID, ts: now})
+	rt.seen[rumorID] = el
+	if rt.order.Len() > rt.capacity {
 		rt.evictOldest()
 	}
 }
 
-// evictOldest removes the oldest half of entries. Must hold mu.
+// evictOldest removes the single least-recently-used entry. O(1).
+// Must hold mu.
 func (rt *RumorTracker) evictOldest() {
-	type entry struct {
-		key string
-		ts  int64
+	tail := rt.order.Back()
+	if tail == nil {
+		return
 	}
-	entries := make([]entry, 0, len(rt.seen))
-	for k, v := range rt.seen {
-		entries = append(entries, entry{k, v})
-	}
-	half := len(entries) / 2
-	for i := 0; i < half; i++ {
-		minIdx := i
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].ts < entries[minIdx].ts {
-				minIdx = j
-			}
-		}
-		entries[i], entries[minIdx] = entries[minIdx], entries[i]
-		delete(rt.seen, entries[i].key)
-	}
+	entry := tail.Value.(*seenEntry)
+	rt.order.Remove(tail)
+	delete(rt.seen, entry.key)
 }
 
 // ShouldForward returns true based on probability decay: P / (1 + hopCount).
@@ -129,15 +151,17 @@ func (rt *RumorTracker) ShouldForward(hopCount uint8) bool {
 }
 
 // WriteRumor writes a G3 rumor frame to conn. The payload is opaque bytes
-// that the consumer has already serialised.
+// that the consumer has already serialised. Uses net.Buffers to hand the
+// header and payload to the OS writev path (where supported), avoiding
+// the per-send copy into a merged buffer.
 func WriteRumor(conn net.Conn, payload []byte, hopCount uint8, fromDimension uint8) error {
-	buf := make([]byte, rumorHeaderSize+len(payload))
-	binary.BigEndian.PutUint16(buf[0:2], RumorMagic)
-	binary.BigEndian.PutUint32(buf[2:6], uint32(len(payload)))
-	buf[6] = hopCount
-	buf[7] = fromDimension
-	copy(buf[8:], payload)
-	_, err := conn.Write(buf)
+	var hdr [rumorHeaderSize]byte
+	binary.BigEndian.PutUint16(hdr[0:2], RumorMagic)
+	binary.BigEndian.PutUint32(hdr[2:6], uint32(len(payload)))
+	hdr[6] = hopCount
+	hdr[7] = fromDimension
+	bufs := net.Buffers{hdr[:], payload}
+	_, err := bufs.WriteTo(conn)
 	return err
 }
 
@@ -243,7 +267,7 @@ func NewRumorPusher(cfg RumorConfig, rumorIDFn RumorIDFunc) *RumorPusher {
 	return &RumorPusher{
 		tracker:   NewRumorTracker(cfg),
 		peers:     make(map[string]RumorPeerConn),
-		inbound:   make(chan RumorMessage, 64),
+		inbound:   make(chan RumorMessage, rumorInboundCapacity),
 		rumorIDFn: rumorIDFn,
 	}
 }
@@ -273,8 +297,17 @@ func (rp *RumorPusher) SetHypercube(cube *Hypercube) {
 }
 
 // NotifyNewPayload queues an opaque payload for rumor push (non-blocking).
+// Payloads larger than MaxRumorPayloadBytes are dropped; they still reach
+// peers via the G1 delta path, but holding them in the bounded inbound
+// queue would pin (capacity × payload-size) bytes resident in the worst
+// case. queueFull covers both overflow and oversized-drop cases.
 func (rp *RumorPusher) NotifyNewPayload(payload []byte) {
 	rp.notified.Add(1)
+	if len(payload) > MaxRumorPayloadBytes {
+		dbgRumor.Printf("NotifyNewPayload: dropping oversized rumor payload (%d > %d bytes)", len(payload), MaxRumorPayloadBytes)
+		rp.queueFull.Add(1)
+		return
+	}
 	id := rp.rumorIDFn(payload)
 	select {
 	case rp.inbound <- RumorMessage{ID: id, Payload: payload}:

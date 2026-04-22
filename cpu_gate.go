@@ -13,11 +13,11 @@ import (
 	"time"
 )
 
-// CPUGate provides a defer-or-drop decision based on process CPU load
-// (2D in the mesh-stabilization plan). It is queried before a gossip
-// publish or response is enqueued; when load is above the configured
-// threshold, the caller receives ErrBackpressure (or similar) and can
-// shed work instead of piling up queue depth.
+// CPUGate provides a defer-or-drop decision based on process CPU load.
+// It is queried before a gossip publish or response is enqueued; when
+// load is above the configured threshold, the caller receives
+// ErrBackpressure (or similar) and can shed work instead of piling up
+// queue depth.
 //
 // Two signal sources, max-merged so either one can trip the gate:
 //
