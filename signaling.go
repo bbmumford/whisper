@@ -44,11 +44,11 @@ type ExchangeMeta struct {
 	// Offer signals desire for a direct connection.
 	Offer *ConnectionOffer `json:"conn_offer,omitempty"`
 
-	// ConnectionCounts is the gossip-propagated connection map (Phase 12).
+	// ConnectionCounts is the gossip-propagated connection map.
 	// Maps nodeID -> current inbound+outbound connection count.
 	ConnectionCounts map[string]int `json:"conn_counts,omitempty"`
 
-	// PEXEntries carries signed peer advertisements piggybacked on gossip (Phase 10).
+	// PEXEntries carries signed peer advertisements piggybacked on gossip.
 	// Max PEXMaxEntriesPerExchange entries per exchange, rate-limited per peer.
 	PEXEntries []PEXEntry `json:"pex_entries,omitempty"`
 
@@ -58,13 +58,13 @@ type ExchangeMeta struct {
 	CacheFingerprint uint64 `json:"cache_fp,omitempty"`
 
 	// BackpressureSignal indicates the sender is overwhelmed and cannot process
-	// gossip exchanges fast enough (Phase G4). When true, receiving peers should
+	// gossip exchanges fast enough. When true, receiving peers should
 	// apply exponential backoff to their gossip interval for this peer:
 	//   - Initial backoff: 30s
 	//   - Doubles each consecutive signal: 30s -> 60s -> 120s (capped)
 	//   - Resets to 0 when the peer stops signaling backpressure
 	// The signal is set by BackpressureMonitor when pendingExchanges exceeds
-	// the threshold (default 5). The field is omitempty so old nodes that never
+	// the threshold (default 5). The field is omitempty so peers that never
 	// set it are treated as healthy (no backoff applied).
 	BackpressureSignal bool `json:"backpressure,omitempty"`
 }

@@ -18,15 +18,15 @@ import (
 // newer than that watermark, instead of waiting for the next adaptive-
 // interval G1 tick.
 //
-// Use cases (2C in the mesh-stabilization plan):
+// Use cases:
 //
-//  1. Browser peers (v0.0.169 browser transport) that connect briefly,
-//     pull current LAD state to catch up, disconnect. No gossip-cycle
-//     participation needed — they just need a one-shot sync.
+//  1. Short-lived browser peers that connect briefly, pull current LAD
+//     state to catch up, then disconnect. No gossip-cycle participation
+//     needed — they just need a one-shot sync.
 //  2. Post-partition convergence — after a netsplit heals, a lagging
 //     peer can pull to catch up in one round-trip instead of waiting
 //     up to the full adaptive-full-sync cycle.
-//  3. Diagnostic pulls — help.orbtr.io can pull from any peer for
+//  3. Diagnostic pulls — operator tooling can pull from any peer for
 //     on-demand LAD state without disturbing the peer's gossip cadence.
 //
 // Wire format (G4 request):

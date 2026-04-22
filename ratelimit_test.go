@@ -125,8 +125,7 @@ func TestAdaptiveIntervalGrowsUnderBackpressure(t *testing.T) {
 		t.Fatalf("expected interval to saturate at max=60s, got %v", a.Current())
 	}
 	// No backpressure → unchanged underlying state (Current reads the
-	// stored unjittered base; the return is a jittered sample around it
-	// per 2A in the mesh-stabilization plan).
+	// stored unjittered base; the return is a jittered sample around it).
 	a = NewAdaptiveInterval(10*time.Second, 2*time.Second, 60*time.Second)
 	before := a.Current()
 	after := a.ApplyBackpressure(false)
