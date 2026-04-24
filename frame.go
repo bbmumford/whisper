@@ -253,13 +253,26 @@ func WithSeenIDTracking(enabled bool) EngineOption {
 }
 
 // RegisterFrameKind installs a custom FrameHandler for a specific
-// 2-byte magic. Returns an error if the magic is already registered or
-// collides with a built-in (DigestMagic, gossipMagic, RumorMagic).
+// 2-byte magic. Returns an error if:
+//   - the magic is DigestMagic or RumorMagic (built-ins that the
+//     consumer must not override — use the With* options to
+//     customise their behaviour instead);
+//   - the magic is already registered (double-register is almost
+//     always a consumer wiring bug);
+//   - handler is nil.
+//
+// GossipMagic (G1) is intentionally allowed because the G1 wire
+// format depends on the consumer's record codec — no built-in G1
+// handler exists, so the consumer MUST register one for G1 to work.
+//
 // Call before RunResponder — concurrent registration during
 // responder loop execution is a race.
 func (e *Engine) RegisterFrameKind(magic uint16, handler FrameHandler) error {
 	if handler == nil {
 		return errors.New("whisper: nil FrameHandler")
+	}
+	if magic == DigestMagic || magic == RumorMagic {
+		return fmt.Errorf("whisper: frame magic 0x%04X is a built-in; configure via With* options instead of overriding", magic)
 	}
 	if e.resp.handlers == nil {
 		e.resp.handlers = make(map[uint16]FrameHandler)
