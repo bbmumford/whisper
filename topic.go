@@ -118,17 +118,68 @@ func (r *TopicRegistry) Count() int {
 	return len(r.topics)
 }
 
-// StateStore is the interface Whisper uses to read/write topic state.
-// Consumers implement this (e.g., Ledger's DirectoryCache).
+// StateStore is the read/write surface Whisper drives during G1/G2
+// exchanges and rumor push. Consumers implement this by wrapping
+// their authoritative record store (e.g., Ledger's DirectoryCache).
+//
+// Records are opaque byte slices from Whisper's perspective — the
+// consumer's G1Codec handles (de)serialisation at the exchange
+// boundary. Apply is the single ingest point for both G1 responses
+// and G3 rumors so merge semantics live in one place.
 type StateStore interface {
-	// Fingerprint returns a cache fingerprint for delta-sync optimisation.
-	Fingerprint(topic string) uint64
+	// Fingerprint returns a 64-bit summary of current state. Used by
+	// G2 digest probes — equality means both sides agree on every
+	// record and the follow-up G1 can be skipped. Must change on any
+	// mutation to avoid false-positive matches.
+	Fingerprint() uint64
 
-	// DeltaSince returns records changed since the given watermark.
-	DeltaSince(topic string, since uint64) ([][]byte, uint64, error)
+	// Snapshot returns every live record as opaque bytes. Called by
+	// the initiator when no per-peer watermark is available and by
+	// the responder on forced full-sync cycles.
+	Snapshot() [][]byte
 
-	// Apply stores an incoming record, merging via the registered MergeFunc.
-	Apply(topic string, data []byte) error
+	// Delta returns records mutated since the given time. A zero
+	// time is equivalent to Snapshot. Implementations may return the
+	// full snapshot when they can't cheaply compute a delta — the
+	// initiator tolerates over-sending.
+	Delta(since time.Time) [][]byte
+
+	// Apply ingests a single inbound record. Merge/tombstone/LWW
+	// resolution is the consumer's responsibility; Whisper just
+	// hands over the bytes and trusts the return for success
+	// counting.
+	Apply(data []byte) error
+}
+
+// G1Codec serialises and deserialises the body of a G1 exchange frame.
+// Whisper owns the [magic][length] framing; the codec owns everything
+// inside so consumers can choose protobuf, JSON, CBOR, or a custom
+// envelope that carries both records and ExchangeMeta piggyback data.
+//
+// The codec MUST round-trip without loss: DecodeExchange(EncodeExchange(r, m))
+// yields an equivalent DecodedExchange. Errors from either direction
+// are surfaced to the native G1 handler, which logs and skips the
+// frame rather than tearing down the session.
+type G1Codec interface {
+	// EncodeExchange serialises records + meta into the G1 body.
+	EncodeExchange(records [][]byte, meta *ExchangeMeta) ([]byte, error)
+
+	// DecodeExchange extracts records, the peer's meta, and an
+	// optional list of node IDs referenced by those records (for
+	// liveness tracking via GossipResult.SeenNodeIDs). Unknown
+	// fields must be tolerated so forward-compatible meta
+	// additions don't break existing peers.
+	DecodeExchange(body []byte) (DecodedExchange, error)
+}
+
+// DecodedExchange is the G1Codec's decoded view of an inbound G1
+// frame body. SeenNodeIDs is optional — codecs that can't cheaply
+// extract identity leave it nil and liveness falls back to coarser
+// signals.
+type DecodedExchange struct {
+	Records     [][]byte
+	Meta        *ExchangeMeta
+	SeenNodeIDs []string
 }
 
 // TopicHandler handles incoming messages for a topic.

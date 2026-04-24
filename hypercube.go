@@ -47,32 +47,16 @@ type Hypercube struct {
 // NewHypercube creates a hypercube for the given local node ID.
 // Call Rebuild() with the current member list to initialize.
 //
-// Consumers that don't know their NodeID at construction time (e.g.
-// an agent before enrollment completes) may pass "" and later call
-// SetSelfID once the identity is known, then trigger a Rebuild.
-// Without a valid selfID the hypercube's Neighbors() returns nil so
-// the local node never participates in rumor fanout — pass "" only
-// if you will call SetSelfID before relying on the hypercube.
+// selfID is required and immutable after construction — pass the
+// local node's canonical NodeID. Consumers that don't know their
+// NodeID until after an async step (e.g. an agent waiting on
+// enrollment) should defer construction until the identity is
+// available rather than mutating it later; the immutable design
+// prevents the "empty selfID → nil Neighbors → silent routing
+// fallback" class of bug that arose from constructor-time
+// uncertainty.
 func NewHypercube(selfID string) *Hypercube {
 	return &Hypercube{selfID: selfID, selfPos: -1}
-}
-
-// SetSelfID updates the local node identity after construction. Useful
-// for consumers that construct the hypercube before enrollment
-// resolves their NodeID. Re-derives selfPos from the current member
-// list so the caller doesn't need to follow up with a Rebuild when
-// the membership hasn't changed.
-func (h *Hypercube) SetSelfID(selfID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.selfID = selfID
-	h.selfPos = -1
-	for i, id := range h.members {
-		if id == selfID {
-			h.selfPos = i
-			break
-		}
-	}
 }
 
 // Rebuild recomputes the hypercube from the current member list.
