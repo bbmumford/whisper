@@ -48,6 +48,13 @@ type Engine struct {
 	// the zero value is usable (defaults apply) so simple initiator-
 	// only consumers never notice the field.
 	resp responderConfig
+
+	// g1 holds the G1 exchange wiring (StateStore, codec, observer).
+	// Empty until WithG1Store + WithG1Codec are supplied — the native
+	// G1 handler installs itself only once both are present so
+	// consumers that still ship a custom G1 handler via
+	// RegisterFrameKind are free to keep doing so.
+	g1 g1Package
 }
 
 // EngineOption configures the engine at creation time.

@@ -379,6 +379,31 @@ func (c *responderConfig) ensureDefaults(e *Engine) {
 	if _, ok := c.handlers[DigestMagic]; !ok {
 		c.handlers[DigestMagic] = &digestHandler{cfg: c}
 	}
+	// G1 native handler — installs itself only when both a
+	// StateStore and a G1Codec are wired so consumers that still
+	// supply their own G1 FrameHandler via RegisterFrameKind
+	// (e.g. legacy code paths during migration) keep control. The
+	// DeltaTracker, metaProvider, and fingerprintProvider are all
+	// optional — missing any one degrades gracefully (full snapshots
+	// only, empty meta, zero fingerprint).
+	if _, ok := c.handlers[GossipMagic]; !ok && e.g1.store != nil && e.g1.codec != nil {
+		if e.g1.delta == nil {
+			e.g1.delta = e.delta
+		}
+		if e.g1.metaHook == nil {
+			e.g1.metaHook = c.metaProvider
+		}
+		if e.g1.rumor == nil {
+			e.g1.rumor = e.rumor
+		}
+		// Fingerprint falls back to the store if no explicit
+		// provider was supplied — the store IS the authoritative
+		// fingerprint source when native G1 is active.
+		if c.fingerprintProvider == nil {
+			c.fingerprintProvider = g1StoreFingerprint{store: e.g1.store}
+		}
+		c.handlers[GossipMagic] = &g1Handler{cfg: c, g1: &e.g1}
+	}
 	// Wire the rumor handler only when the engine has a rumor pusher
 	// AND the consumer wired an apply fn. Without both, rumor frames
 	// have nowhere meaningful to go — better to leave the handler
@@ -393,13 +418,25 @@ func (c *responderConfig) ensureDefaults(e *Engine) {
 		}
 		c.handlers[RumorMagic] = &rumorHandler{cfg: c, engine: e}
 	}
-	// G1 (gossipMagic) is not built-in here — the consumer must
-	// register it explicitly because the G1 body format depends on
-	// the consumer's topic codec. Library LAD uses a protobuf
-	// envelope; other consumers may use JSON or a custom wire.
 	if c.fatalClassifier == nil {
 		c.fatalClassifier = defaultFatalClassifier
 	}
+}
+
+// g1StoreFingerprint adapts a StateStore's topic-agnostic Fingerprint()
+// to the FingerprintProvider the G2 digest handler consumes. Active
+// only when native G1 is enabled and the consumer didn't wire an
+// explicit FingerprintProvider of their own.
+type g1StoreFingerprint struct {
+	store StateStore
+}
+
+// Fingerprint delegates to the store.
+func (g g1StoreFingerprint) Fingerprint() uint64 {
+	if g.store == nil {
+		return 0
+	}
+	return g.store.Fingerprint()
 }
 
 // defaultRumorDedupKey hashes the first 32 bytes of a payload with
