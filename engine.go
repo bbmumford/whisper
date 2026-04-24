@@ -42,6 +42,12 @@ type Engine struct {
 	// serialization (protobuf, JSON, etc.) and the actual send/receive over conn.
 	// Returns the exchange result for adaptive interval tuning.
 	ExchangeFunc func(ctx context.Context, conn net.Conn, meta *ExchangeMeta) (GossipResult, error)
+
+	// resp holds the responder-loop configuration populated by
+	// With*-option setters. RunResponder consults it at call time;
+	// the zero value is usable (defaults apply) so simple initiator-
+	// only consumers never notice the field.
+	resp responderConfig
 }
 
 // EngineOption configures the engine at creation time.
