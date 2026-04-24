@@ -24,12 +24,6 @@ const g1HeaderSize = 6
 // still accepting full-state dumps on reasonably-sized fleets.
 const defaultG1MaxPayload uint32 = 1 << 20 // 1 MiB
 
-// defaultG1Exchange is the per-exchange wall-clock deadline when
-// WithExchangeDeadline wasn't configured. A stalled peer blocks only
-// this long before the handler gives up and the responder loop exits
-// rather than leaking goroutines on a dead socket.
-const defaultG1Exchange = 30 * time.Second
-
 // G1ExchangeObserver is invoked once per successful G1 exchange with
 // the observed result and the peer's identity. Consumers use this for
 // latency metrics, per-peer liveness bookkeeping, and callbacks that
@@ -103,15 +97,12 @@ func (h *g1Handler) Handle(ctx context.Context, conn net.Conn, peerNodeID string
 
 	exchangeStart := time.Now()
 
-	// Per-exchange deadline so a stalled remote can't hold the
-	// responder indefinitely.
-	if d := h.exchangeDeadline(); d > 0 {
-		prev := time.Now().Add(d)
-		if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(prev) {
-			prev = ctxDeadline
-		}
-		_ = conn.SetDeadline(prev)
-	}
+	// NOTE: do NOT call conn.SetDeadline here — consumer conn adapters
+	// (e.g. aether's StreamConn) flush any buffered read state when
+	// SetDeadline is called, which would discard the remainder of the
+	// magic-read message (the length header immediately after the
+	// 2-byte magic lives in the same inbound frame). Per-exchange
+	// cancellation rides on ctx via the outer RunResponder loop.
 
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
@@ -254,15 +245,6 @@ func (h *g1Handler) maxPayload() uint32 {
 		return h.cfg.maxPayloadSize
 	}
 	return defaultG1MaxPayload
-}
-
-// exchangeDeadline returns the configured or default per-exchange
-// wall-clock deadline.
-func (h *g1Handler) exchangeDeadline() time.Duration {
-	if h.cfg.exchangeDeadline > 0 {
-		return h.cfg.exchangeDeadline
-	}
-	return defaultG1Exchange
 }
 
 // bufferPool returns the consumer-supplied or default pool for G1
