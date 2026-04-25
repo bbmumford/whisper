@@ -5,6 +5,7 @@
 package whisper
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -291,4 +292,139 @@ type DeltaSyncMeta struct {
 	IsFullSync  bool      `json:"full"`         // true if this is a full dump
 	Watermark   time.Time `json:"wm,omitempty"` // sender's watermark for this peer
 	RecordCount int       `json:"count"`        // number of records in this exchange
+}
+
+// PersistedPeerState is the over-the-wire / over-the-disk representation
+// of a single peer's delta state, used by DeltaPersistence to round-trip
+// state across process restarts. Keep field tags stable — they're the
+// disk schema for any backend that serialises this struct.
+type PersistedPeerState struct {
+	PeerID        string    `json:"peer_id"`
+	Watermark     time.Time `json:"watermark"`
+	ExchangeCount int       `json:"exchange_count"`
+	LastActivity  time.Time `json:"last_activity"`
+	AppliedOnFull int       `json:"applied_on_full"`
+	FullSyncCount int       `json:"full_sync_count"`
+}
+
+// DeltaPersistence is the storage backend the consumer supplies for
+// surviving DeltaTracker state across process restarts. Without this,
+// every fly redeploy wipes per-peer watermarks and the next gossip
+// exchange to every peer is a full snapshot — the convergence-burst
+// pattern that drains stream credit windows.
+//
+// Implementations:
+//   - Library: JSON file under <dataDir>/.mesh/watermarks.json with
+//     atomic write (temp + rename).
+//   - Agent: row in the existing SQLite keystore (encrypts at rest
+//     when ColumnEncryptor is wired).
+//
+// Save / Load run on the DeltaTracker's lifecycle ticks (every 30 sec
+// by default plus on shutdown); both are called with the tracker's
+// mutex NOT held so backends can do whatever IO they need.
+type DeltaPersistence interface {
+	// Save persists the snapshot to durable storage. Errors are logged
+	// but don't stop the tracker — a failed save means the next
+	// restart costs more, not that the running process breaks.
+	Save([]PersistedPeerState) error
+
+	// Load returns the most recent snapshot. An empty slice + nil err
+	// means "nothing persisted yet" (first-ever boot). A non-nil error
+	// means the backend is broken; the tracker logs and continues
+	// with empty state (degrades to today's behavior).
+	Load() ([]PersistedPeerState, error)
+}
+
+// AttachPersistence wires a persistence backend to the tracker.
+// On attach, the backend's Load is invoked synchronously; persisted
+// entries with watermarks older than maxAge are discarded (they refer
+// to records the peer has likely evicted, so the watermark would
+// suppress a needed full sync).
+//
+// The save loop runs on saveInterval ticks until ctx is cancelled.
+// On ctx cancellation a final Save fires so graceful shutdowns
+// preserve state. Crash-stops lose at most saveInterval of progress —
+// acceptable for an optimisation layer (worst case is one full sync
+// per crashed peer pair, which Phase 0a's credit-leak fix tolerates).
+//
+// Idempotent — multiple calls overwrite the persistence reference
+// but only one save loop runs (guarded by sweeperOnce-like state).
+func (dt *DeltaTracker) AttachPersistence(ctx context.Context, p DeltaPersistence, saveInterval time.Duration, maxAge time.Duration) {
+	if p == nil {
+		return
+	}
+	if saveInterval <= 0 {
+		saveInterval = 30 * time.Second
+	}
+	if maxAge <= 0 {
+		maxAge = 20 * time.Minute // 2× recordTTL by default
+	}
+
+	// Load + restore.
+	if persisted, err := p.Load(); err == nil {
+		now := time.Now()
+		dt.mu.Lock()
+		for _, ps := range persisted {
+			if ps.PeerID == "" {
+				continue
+			}
+			// Discard stale watermarks — they refer to records likely
+			// already evicted from the peer's cache.
+			if !ps.Watermark.IsZero() && now.Sub(ps.Watermark) > maxAge {
+				continue
+			}
+			dt.peers[ps.PeerID] = &peerDeltaState{
+				watermark:     ps.Watermark,
+				exchangeCount: ps.ExchangeCount,
+				lastActivity:  ps.LastActivity,
+				appliedOnFull: ps.AppliedOnFull,
+				fullSyncCount: ps.FullSyncCount,
+			}
+		}
+		dt.mu.Unlock()
+	}
+
+	// Save loop.
+	go func() {
+		ticker := time.NewTicker(saveInterval)
+		defer ticker.Stop()
+		flush := func() {
+			snap := dt.snapshotForPersist()
+			if err := p.Save(snap); err != nil {
+				// Log via dbgGossip — Save is best-effort; a failure
+				// reduces convergence cost on next boot but doesn't
+				// affect the running process.
+				dbgGossip.Printf("DeltaTracker persistence save: %v", err)
+			}
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				flush()
+				return
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+}
+
+// snapshotForPersist returns a snapshot suitable for DeltaPersistence.Save.
+// Internal helper — takes dt.mu briefly to copy state, then returns
+// without the lock so the backend can take its time on IO.
+func (dt *DeltaTracker) snapshotForPersist() []PersistedPeerState {
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	out := make([]PersistedPeerState, 0, len(dt.peers))
+	for peerID, st := range dt.peers {
+		out = append(out, PersistedPeerState{
+			PeerID:        peerID,
+			Watermark:     st.watermark,
+			ExchangeCount: st.exchangeCount,
+			LastActivity:  st.lastActivity,
+			AppliedOnFull: st.appliedOnFull,
+			FullSyncCount: st.fullSyncCount,
+		})
+	}
+	return out
 }

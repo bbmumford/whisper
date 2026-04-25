@@ -198,8 +198,42 @@ type RumorPusher struct {
 	tracker  *RumorTracker
 	peers    map[string]RumorPeerConn // nodeID → peer connection
 	cube     *Hypercube               // structured overlay (nil until initialized)
+	cubeExt  *HypercubeExt            // Phase 6 extended cube (optional; supersedes cube when set)
 	inbound  chan RumorMessage
 	rumorIDFn RumorIDFunc // consumer-provided dedup key generator
+
+	// ackTracker tracks pending ACKs per (rumorID, peerID). Active only
+	// when ACKEnabled — peers that don't advertise the RumorACK
+	// capability bypass the tracker entirely. The retry sweeper goroutine
+	// runs only when the tracker is active.
+	ackTracker  *rumorACKTracker
+	lossTracker *peerLossTracker
+	ackEnabled  bool
+	ackTimeout  time.Duration
+	ackMaxRetry int
+
+	// policy is the optional NetworkPolicy override. When set, ACK
+	// retry timing and fanout decisions read from the policy
+	// profile (RumorRetryInitial / RumorFanout) instead of the
+	// fixed values supplied to EnableACKs. Profile transitions
+	// take effect on the next push without restarting the sweeper.
+	policy NetworkPolicy
+
+	// emitFn is the optional MeshEvent producer. When set, rumor
+	// lifecycle decisions emit EventRumorSent / Acked / Retry /
+	// Dropped through it. Function-typed (rather than *eventBus)
+	// so consumers can multiplex events into their own subscribers
+	// (connection-history, mesh-debug, OTLP) without depending on
+	// whisper's internal event-bus type.
+	emitFn func(GossipEvent)
+
+	// peerSupportsACKFn returns true when a peer has advertised the
+	// RumorACK capability. nil = treat all peers as capable (today's
+	// default; fine when ACKs are enabled fleet-wide). When set, the
+	// ACK tracker only registers entries for capable peers — saves
+	// retry budget on mixed-version meshes that include legacy
+	// peers without RumorACK.
+	peerSupportsACKFn func(peerID string) bool
 
 	// Observability counters — lock-free. Call sites increment them via
 	// atomic ops; Stats() reads them for a snapshot.
@@ -209,12 +243,18 @@ type RumorPusher struct {
 	//   - pushesHypercube: rumor writes that went via the hypercube overlay
 	//   - pushesRandom:    rumor writes that went via random-peer fallback
 	//   - writeErrors:     RumorPeerConn.WriteRumor failures
+	//   - acksReceived:    G3-ACK frames matched to a tracked rumor
+	//   - rumorRetries:    rumors re-pushed after ACK timeout
+	//   - rumorDropped:    rumors that exhausted retry budget without ACK
 	notified         atomic.Uint64
 	deduped          atomic.Uint64
 	queueFull        atomic.Uint64
 	pushesHypercube  atomic.Uint64
 	pushesRandom     atomic.Uint64
 	writeErrors      atomic.Uint64
+	acksReceived     atomic.Uint64
+	rumorRetries     atomic.Uint64
+	rumorDropped     atomic.Uint64
 }
 
 // RumorStats is a point-in-time snapshot of rumor-push effectiveness.
@@ -225,6 +265,10 @@ type RumorStats struct {
 	PushesHypercube uint64 // frame writes via hypercube overlay
 	PushesRandom    uint64 // frame writes via random-peer fallback
 	WriteErrors     uint64 // peer.WriteRumor failures
+	AcksReceived    uint64 // G3-ACK confirmations matched to outstanding rumors
+	RumorRetries    uint64 // rumor re-pushes after ACK timeout
+	RumorDropped    uint64 // rumors that exhausted retry budget
+	PendingAcks     int    // outstanding (rumor, peer) pairs awaiting ACK
 	Peers           int    // current peer count (RegisterPeer − UnregisterPeer)
 	SeenCache       int    // current size of the tracker's seen map
 }
@@ -238,6 +282,10 @@ func (rp *RumorPusher) Stats() RumorStats {
 	rp.tracker.mu.Lock()
 	seenCount := len(rp.tracker.seen)
 	rp.tracker.mu.Unlock()
+	pendingAcks := 0
+	if rp.ackTracker != nil {
+		pendingAcks = rp.ackTracker.PendingCount()
+	}
 	return RumorStats{
 		Notified:        rp.notified.Load(),
 		Deduped:         rp.deduped.Load(),
@@ -245,6 +293,10 @@ func (rp *RumorPusher) Stats() RumorStats {
 		PushesHypercube: rp.pushesHypercube.Load(),
 		PushesRandom:    rp.pushesRandom.Load(),
 		WriteErrors:     rp.writeErrors.Load(),
+		AcksReceived:    rp.acksReceived.Load(),
+		RumorRetries:    rp.rumorRetries.Load(),
+		RumorDropped:    rp.rumorDropped.Load(),
+		PendingAcks:     pendingAcks,
 		Peers:           peerCount,
 		SeenCache:       seenCount,
 	}
@@ -275,6 +327,223 @@ func NewRumorPusher(cfg RumorConfig, rumorIDFn RumorIDFunc) *RumorPusher {
 // Tracker returns the underlying RumorTracker (for responder G3 handling).
 func (rp *RumorPusher) Tracker() *RumorTracker { return rp.tracker }
 
+// SetNetworkPolicy wires the rumor pusher to consult a NetworkPolicy
+// for retry timing and fanout overrides. Subsequent pushes read
+// `Profile().RumorRetryInitial` and `Profile().RumorFanout` to
+// override the fixed values supplied to EnableACKs / RumorConfig.
+// Without this, fixed defaults apply.
+func (rp *RumorPusher) SetNetworkPolicy(p NetworkPolicy) {
+	rp.mu.Lock()
+	rp.policy = p
+	rp.mu.Unlock()
+}
+
+// SetEventEmitter wires the rumor pusher to a MeshEvent producer
+// callback. Lifecycle events (RumorSent, RumorAcked, RumorRetry,
+// RumorDropped) emit through the callback when set; without it the
+// pusher updates only its atomic counters. Function-typed so
+// consumers can fan events into their own subscribers
+// (connection-history, mesh-debug, OTLP) without depending on
+// whisper's internal event-bus type.
+func (rp *RumorPusher) SetEventEmitter(fn func(GossipEvent)) {
+	rp.mu.Lock()
+	rp.emitFn = fn
+	rp.mu.Unlock()
+}
+
+// effectiveRumorTimeout returns the retry timeout, preferring the
+// network policy when configured.
+func (rp *RumorPusher) effectiveRumorTimeout() time.Duration {
+	rp.mu.RLock()
+	policy := rp.policy
+	timeout := rp.ackTimeout
+	rp.mu.RUnlock()
+	if policy != nil {
+		if pt := policy.Profile().RumorRetryInitial; pt > 0 {
+			return pt
+		}
+	}
+	return timeout
+}
+
+// effectiveFanout returns the per-peer fanout factor, layered as:
+//
+//   1. Static config baseline (RumorConfig.Fanout)
+//   2. Policy override when configured (Profile().RumorFanout)
+//   3. Adaptive bump-up when the peer's loss rate > 10%
+//
+// Returns the fanout to use for a specific peer's push.
+func (rp *RumorPusher) effectiveFanout(peerID string) int {
+	rp.mu.RLock()
+	policy := rp.policy
+	loss := rp.lossTracker
+	rp.mu.RUnlock()
+
+	base := rp.tracker.config.Fanout
+	if policy != nil {
+		if pf := policy.Profile().RumorFanout; pf > 0 {
+			base = pf
+		}
+	}
+	// Adaptive bump on detected loss — the per-peer LossTracker
+	// has accumulated rumor-ACK miss data over the recent window.
+	if loss != nil && loss.LossRate(peerID) > 0.10 {
+		return base + 1
+	}
+	return base
+}
+
+// emitEvent publishes a GossipEvent via the optional callback.
+// No-op when no callback is wired.
+func (rp *RumorPusher) emitEvent(kind GossipEventKind, peerID string) {
+	rp.mu.RLock()
+	fn := rp.emitFn
+	rp.mu.RUnlock()
+	if fn != nil {
+		fn(GossipEvent{Kind: kind, PeerNodeID: peerID, Time: time.Now()})
+	}
+}
+
+// EnableACKs activates the rumor ACK protocol on this pusher. Without
+// it, PushRumor / PushRumorExcluding behave exactly as before (best-
+// effort, no delivery confirmation). With it active:
+//
+//   - every per-peer rumor send registers an entry in the ACK tracker
+//   - the receiver-of-ACK loop on the rumor stream calls HandleACK to
+//     dispatch incoming G3-ACK frames into the tracker
+//   - a sweeper goroutine polls for ACK timeouts on the configured
+//     interval; timed-out rumors retry via an alternate hypercube edge
+//     until the retry budget is exhausted
+//
+// Capability gating MUST happen at the registration boundary: only
+// peers that advertise RumorACK should be passed to RegisterPeer
+// when ACKs are enabled, otherwise their rumors will time out
+// every cycle and waste retry budget. Mixed-version meshes register
+// non-ACK peers separately or run with EnableACKs disabled per-peer.
+//
+// Idempotent — multiple calls update timeout/retry parameters but
+// only one sweeper runs.
+func (rp *RumorPusher) EnableACKs(timeout time.Duration, maxRetries int) {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	if maxRetries < 0 {
+		maxRetries = 3
+	}
+	rp.mu.Lock()
+	rp.ackEnabled = true
+	rp.ackTimeout = timeout
+	rp.ackMaxRetry = maxRetries
+	if rp.ackTracker == nil {
+		rp.ackTracker = newRumorACKTracker()
+		rp.lossTracker = newPeerLossTracker(100)
+		go rp.ackSweepLoop()
+	}
+	rp.mu.Unlock()
+}
+
+// HandleACK is called by the ACK reader loop on each peer's rumor
+// stream when a G3-ACK frame arrives. Looks up the (rumorID, peerID)
+// pair in the tracker; if matched, clears the entry, bumps the
+// acksReceived counter, and emits EventRumorAcked. Unknown ACKs
+// are silently ignored — duplicates or late arrivals after
+// retry-budget exhaustion.
+func (rp *RumorPusher) HandleACK(rumorID, peerID string) {
+	rp.mu.RLock()
+	tracker := rp.ackTracker
+	rp.mu.RUnlock()
+	if tracker == nil {
+		return
+	}
+	if tracker.Acked(rumorID, peerID) {
+		rp.acksReceived.Add(1)
+		rp.emitEvent(EventRumorAcked, peerID)
+	}
+}
+
+// ackSweepLoop polls the ACK tracker for timed-out entries and
+// retries each via an alternate hypercube edge or drops on retry-
+// budget exhaustion. Runs until ackTracker.Stop is called.
+func (rp *RumorPusher) ackSweepLoop() {
+	rp.mu.RLock()
+	tracker := rp.ackTracker
+	rp.mu.RUnlock()
+	if tracker == nil {
+		return
+	}
+	// Sweep at half the ACK timeout so we catch timeouts within one
+	// timeout-window of when they actually elapsed.
+	rp.mu.RLock()
+	period := rp.ackTimeout / 2
+	rp.mu.RUnlock()
+	if period < 100*time.Millisecond {
+		period = 100 * time.Millisecond
+	}
+	ticker := time.NewTicker(period)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-tracker.stopCh:
+			return
+		case <-ticker.C:
+			expired := tracker.timedOutEntries()
+			for _, pr := range expired {
+				rp.handleAckTimeout(pr)
+			}
+		}
+	}
+}
+
+// handleAckTimeout retries a rumor against an alternate hypercube
+// edge or drops it if the retry budget is exhausted. Records the
+// loss for adaptive-fanout purposes.
+func (rp *RumorPusher) handleAckTimeout(pr *pendingRumor) {
+	if pr.retries >= pr.maxRetries {
+		rp.rumorDropped.Add(1)
+		if rp.lossTracker != nil {
+			rp.lossTracker.RecordMiss(pr.peerID)
+		}
+		rp.emitEvent(EventRumorDropped, pr.peerID)
+		dbgRumor.Printf("Rumor %s to %s dropped after %d retries", pr.rumorID, pr.peerID, pr.retries)
+		return
+	}
+	rp.rumorRetries.Add(1)
+	rp.emitEvent(EventRumorRetry, pr.peerID)
+
+	// Pick an alternate dimension if hypercube available; else random
+	// fallback to the same peer (best we can do without an overlay).
+	rp.mu.RLock()
+	cube := rp.cube
+	conn, ok := rp.peers[pr.peerID]
+	rp.mu.RUnlock()
+	if !ok {
+		// Peer disconnected during the wait — drop and let the next
+		// rumor's normal fanout cover it.
+		return
+	}
+
+	// Try a different dimension than the original (pr.dimension).
+	// Cube.RouteRumor(pr.dimension) returns dimensions > pr.dimension;
+	// we want any other dimension we haven't tried.
+	var altDim uint8 = pr.dimension
+	if cube != nil {
+		for _, d := range cube.RouteRumor(0) {
+			if uint8(d) != pr.dimension {
+				altDim = uint8(d)
+				break
+			}
+		}
+	}
+	pr.retries++
+	pr.sentAt = time.Now()
+	if err := conn.WriteRumor(pr.payload, pr.hopCount+1, altDim); err != nil {
+		dbgRumor.Printf("Rumor %s retry to %s failed: %v", pr.rumorID, pr.peerID, err)
+		return
+	}
+	// Re-track for the next ACK window.
+	rp.ackTracker.Track(pr.rumorID, pr.peerID, pr.payload, pr.hopCount+1, altDim, pr.timeout, pr.maxRetries-pr.retries)
+}
+
 // RegisterPeer adds a peer connection for rumor delivery.
 func (rp *RumorPusher) RegisterPeer(nodeID string, conn RumorPeerConn) {
 	rp.mu.Lock()
@@ -294,6 +563,42 @@ func (rp *RumorPusher) SetHypercube(cube *Hypercube) {
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
 	rp.cube = cube
+}
+
+// SetHypercubeExt sets the extended hypercube. When set, it supersedes
+// any plain Hypercube wired via SetHypercube — the pusher uses the
+// primary cube for the canonical routing decision and (when the
+// extended options enable it) the dual cube for redundant fanout.
+//
+// Adaptive dimension weighting, RouteToFar dispatch, region-aware
+// ordering and ephemeral exclusion all read from the extended cube;
+// the plain Hypercube path retains today's behavior for callers
+// that haven't migrated.
+func (rp *RumorPusher) SetHypercubeExt(ext *HypercubeExt) {
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	rp.cubeExt = ext
+	if ext != nil {
+		rp.cube = ext.Primary()
+	}
+}
+
+// HypercubeExt returns the configured extended cube, or nil if only
+// a plain Hypercube has been wired.
+func (rp *RumorPusher) HypercubeExt() *HypercubeExt {
+	rp.mu.RLock()
+	defer rp.mu.RUnlock()
+	return rp.cubeExt
+}
+
+// SetPeerCapabilityCheck wires a per-peer capability lookup. The
+// pusher only registers ACK tracking for peers that the callback
+// returns true for. Pass nil to disable gating (every peer is
+// treated as capable; fleet-wide ACK semantics).
+func (rp *RumorPusher) SetPeerCapabilityCheck(fn func(peerID string) bool) {
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	rp.peerSupportsACKFn = fn
 }
 
 // NotifyNewPayload queues an opaque payload for rumor push (non-blocking).
@@ -348,16 +653,50 @@ func (rp *RumorPusher) PushRumorExcluding(payload []byte, hopCount uint8, fromDi
 func (rp *RumorPusher) pushRumorInternal(payload []byte, hopCount uint8, fromDimension uint8, excludeNodeID string) {
 	rp.mu.RLock()
 	cube := rp.cube
+	cubeExt := rp.cubeExt
 	peers := make(map[string]RumorPeerConn, len(rp.peers))
 	for k, v := range rp.peers {
 		if k != excludeNodeID {
 			peers[k] = v
 		}
 	}
+	ackEnabled := rp.ackEnabled
+	ackTimeout := rp.ackTimeout
+	ackMaxRetry := rp.ackMaxRetry
 	rp.mu.RUnlock()
 
 	if len(peers) == 0 {
 		return
+	}
+
+	// Compute the rumor ID once for ACK tracking; reused for every
+	// peer the rumor reaches in this push.
+	rumorID := rp.rumorIDFn(payload)
+
+	// Effective ACK timeout reads from NetworkPolicy when set,
+	// falling back to the value configured at EnableACKs time.
+	if pt := rp.effectiveRumorTimeout(); pt > 0 {
+		ackTimeout = pt
+	}
+
+	rp.mu.RLock()
+	supports := rp.peerSupportsACKFn
+	rp.mu.RUnlock()
+	trackACK := func(peerID string, dim uint8) {
+		if !ackEnabled {
+			return
+		}
+		// Per-peer capability gate: skip ACK tracking for peers
+		// that haven't advertised RumorACK. Without this, every
+		// rumor to a legacy peer wastes retry budget timing out.
+		if supports != nil && !supports(peerID) {
+			return
+		}
+		rp.ackTracker.Track(rumorID, peerID, payload, hopCount+1, dim, ackTimeout, ackMaxRetry)
+		if rp.lossTracker != nil {
+			rp.lossTracker.RecordSent(peerID)
+		}
+		rp.emitEvent(EventRumorSent, peerID)
 	}
 
 	// Try hypercube routing first.
@@ -374,13 +713,51 @@ func (rp *RumorPusher) pushRumorInternal(payload []byte, hopCount uint8, fromDim
 				if err := peer.WriteRumor(payload, hopCount+1, uint8(d)); err != nil {
 					dbgRumor.Printf("Hypercube send to %s dim %d failed: %v", neighbor, d, err)
 					rp.writeErrors.Add(1)
+					if cubeExt != nil {
+						cubeExt.RecordDimensionLoss(d)
+					}
 				} else {
 					sent++
 					rp.pushesHypercube.Add(1)
+					trackACK(neighbor, uint8(d))
+					if cubeExt != nil {
+						cubeExt.RecordDimensionSuccess(d)
+					}
 				}
 				delete(peers, neighbor) // don't double-send via random
 			}
 		}
+
+		// Dual-cube fanout — when the extended cube has the dual
+		// cube enabled, also fan out via the dual cube's neighbors.
+		// The two cubes use different orderings (NodeID-sorted vs
+		// hash-sorted) so their neighbor sets differ; fanning out via
+		// both gives instant redundancy at the cost of a small fanout
+		// multiplier (~2× neighbors per origin push).
+		if cubeExt != nil && cubeExt.Dual() != nil {
+			dual := cubeExt.Dual()
+			dualDims := dual.RouteRumor(int(fromDimension))
+			for _, d := range dualDims {
+				neighbor := dual.DimensionNeighbor(d)
+				if neighbor == "" {
+					continue
+				}
+				peer, ok := peers[neighbor]
+				if !ok {
+					continue
+				}
+				if err := peer.WriteRumor(payload, hopCount+1, uint8(d)); err != nil {
+					dbgRumor.Printf("Dual-cube send to %s dim %d failed: %v", neighbor, d, err)
+					rp.writeErrors.Add(1)
+				} else {
+					sent++
+					rp.pushesHypercube.Add(1)
+					trackACK(neighbor, uint8(d))
+				}
+				delete(peers, neighbor)
+			}
+		}
+
 		if sent > 0 {
 			dbgRumor.Printf("Pushed rumor via hypercube: %d dimensions, hop=%d", sent, hopCount)
 			return // hypercube handled forwarding
@@ -391,14 +768,29 @@ func (rp *RumorPusher) pushRumorInternal(payload []byte, hopCount uint8, fromDim
 	// Random fallback (origin push or degraded hypercube). Fanout scales
 	// with peer count (2B — adaptiveFanout = max(log2(N), configured base))
 	// so large fleets keep probabilistic coverage without fanning out to
-	// every peer.
-	targets := selectRandomPeers(peers, adaptiveFanout(len(peers), rp.tracker.config.Fanout))
+	// every peer. The base fanout reads from NetworkPolicy when set,
+	// and bumps up for peers with elevated loss rate (>10% over the
+	// recent window) so flaky peers get extra fanout coverage.
+	//
+	// We pick a representative peer ID for loss-rate lookup — when
+	// the random selection covers multiple peers, the per-peer
+	// adaptive bump applies once at the global fanout level rather
+	// than per-target. Acceptable simplification because random
+	// fallback is the degraded path; hypercube routing is the
+	// primary and already directs to specific neighbors.
+	var sampleID string
+	for k := range peers {
+		sampleID = k
+		break
+	}
+	targets := selectRandomPeers(peers, adaptiveFanout(len(peers), rp.effectiveFanout(sampleID)))
 	for _, peer := range targets {
 		if err := peer.WriteRumor(payload, hopCount+1, 0xFF); err != nil {
 			dbgRumor.Printf("Random send failed: %v", err)
 			rp.writeErrors.Add(1)
 		} else {
 			rp.pushesRandom.Add(1)
+			trackACK(peer.PeerNodeID(), 0xFF)
 		}
 	}
 	if len(targets) > 0 {
