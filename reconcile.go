@@ -392,6 +392,15 @@ func (d *ReconcileDriver) RunResponderRound(conn net.Conn, body []byte) error {
 	// the engine path on the responder consumed magic for the
 	// initial table frame, but the follow-up reply travels over the
 	// same conn and we must consume its magic manually.
+	//
+	// 10-sec deadline so a stalled or non-G4-speaking initiator can't
+	// pin the responder's frame loop forever — without this, a peer
+	// that crashed mid-round leaves us blocked on a Read that never
+	// returns until the underlying session times out (potentially
+	// minutes), starving every other inbound frame on the same
+	// stream.
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 	if err := consumeReconcileMagic(conn); err != nil {
 		return fmt.Errorf("reconcile: responder read followup magic: %w", err)
 	}
