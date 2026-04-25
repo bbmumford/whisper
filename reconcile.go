@@ -389,31 +389,20 @@ func (d *ReconcileDriver) RunResponderRound(conn net.Conn, body []byte) error {
 		return fmt.Errorf("reconcile: responder write request: %w", err)
 	}
 
-	// Read the initiator's follow-up reply (records we requested).
-	// Initiator writes via writeReconcileFrame, which prepends magic;
-	// the engine path on the responder consumed magic for the
-	// initial table frame, but the follow-up reply travels over the
-	// same conn and we must consume its magic manually.
+	// DO NOT block reading the follow-up reply here. Returning
+	// promptly hands control back to the engine's frame loop, which
+	// is what reads inbound frames on this stream. The initiator's
+	// follow-up reply (ReconcileFlagReply with the records we
+	// requested) arrives as another G4 frame and gets routed back
+	// to reconcileHandler.Handle — which now branches on flags and
+	// applies inbound records when seen.
 	//
-	// NO SetReadDeadline here — the underlying aether StreamConn
-	// flushes its read buffer when SetDeadline is called mid-frame,
-	// which kills the session. The natural Aether session timeout
-	// (multi-second) is the bound on this read; a stalled initiator
-	// surfaces as "session closed" through the existing teardown
-	// path.
-	if err := consumeReconcileMagic(conn); err != nil {
-		return fmt.Errorf("reconcile: responder read followup magic: %w", err)
-	}
-	flags, body2, err := readReconcileFrame(conn)
-	if err != nil {
-		return fmt.Errorf("reconcile: responder read followup: %w", err)
-	}
-	if flags == ReconcileFlagReply {
-		recs, _ := d.codec.DecodeReply(body2)
-		for _, r := range recs {
-			_ = d.store.Apply(r)
-		}
-	}
+	// Earlier revisions read the followup synchronously here, which
+	// blocked the engine's frame loop for the duration of the
+	// followup write. With a stalled or non-responsive initiator,
+	// that wait stretched until Aether keepalive tore down the
+	// whole session — exactly the cascade we observed in production
+	// (RPC dispatch failures coinciding with reconcile rounds).
 	return nil
 }
 
@@ -602,9 +591,23 @@ type reconcileHandler struct {
 }
 
 // Handle implements FrameHandler. Reads the body bytes after the
-// already-consumed magic and dispatches into the driver. Returns
-// FrameContinue on success — reconciliation is one round per
-// frame; subsequent frames are independent rounds.
+// already-consumed magic and dispatches based on flag:
+//
+//	ReconcileFlagTable          — initiator's table frame; build diff +
+//	                              write reply + request, then return.
+//	                              The follow-up Reply (records the
+//	                              initiator was missing) is read from
+//	                              the engine loop on its OWN call to
+//	                              this handler.
+//	ReconcileFlagReply          — initiator's follow-up reply with
+//	                              records we requested; apply them.
+//	ReconcileFlagRequest        — should not arrive here (initiator
+//	                              never sends Request frames); ignored.
+//	ReconcileFlagDecodeFailed   — peer signalled decode failure; nothing
+//	                              to do at the responder side.
+//
+// Returns FrameContinue on success — reconciliation is one frame per
+// call; multi-frame round happens via multiple invocations.
 func (h *reconcileHandler) Handle(_ context.Context, conn net.Conn, peerNodeID string) FrameAction {
 	flags, body, err := readReconcileFrame(conn)
 	if err != nil {
@@ -614,19 +617,30 @@ func (h *reconcileHandler) Handle(_ context.Context, conn net.Conn, peerNodeID s
 		h.cfg.emit(EventFrameError, peerNodeID)
 		return FrameContinue
 	}
-	if flags != ReconcileFlagTable {
-		// Misordered or unexpected frame variant on the responder
-		// path — Reply/Request only arrive inside an initiator-driven
-		// round and shouldn't surface here. Drop and continue rather
-		// than failing the loop.
+	switch flags {
+	case ReconcileFlagTable:
+		h.cfg.emit(EventReconcileStart, peerNodeID)
+		if err := h.driver.RunResponderRound(conn, body); err != nil {
+			h.cfg.emit(EventReconcileDecodeFailure, peerNodeID)
+			return FrameContinue
+		}
+		h.cfg.emit(EventReconcileComplete, peerNodeID)
+	case ReconcileFlagReply:
+		// Initiator's follow-up reply with records we requested.
+		// Apply them to the store; no response needed.
+		recs, err := h.driver.codec.DecodeReply(body)
+		if err == nil {
+			for _, r := range recs {
+				_ = h.driver.store.Apply(r)
+			}
+			h.cfg.emit(EventReconcileComplete, peerNodeID)
+		} else {
+			h.cfg.emit(EventFrameError, peerNodeID)
+		}
+	case ReconcileFlagRequest, ReconcileFlagDecodeFailed:
+		// Stray frame on the responder path — drop quietly.
+	default:
 		h.cfg.emit(EventFrameError, peerNodeID)
-		return FrameContinue
 	}
-	h.cfg.emit(EventReconcileStart, peerNodeID)
-	if err := h.driver.RunResponderRound(conn, body); err != nil {
-		h.cfg.emit(EventReconcileDecodeFailure, peerNodeID)
-		return FrameContinue
-	}
-	h.cfg.emit(EventReconcileComplete, peerNodeID)
 	return FrameContinue
 }

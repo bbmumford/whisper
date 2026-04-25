@@ -206,25 +206,38 @@ func TestReconcileRoundTrip(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// Responder mimics the engine's frame multiplexer:
-		// consume [magic] first, then read the body via the
-		// driver's helper. Real production callers wire this
-		// through the engine's frame dispatch — the test
+		// Responder mimics the engine's frame multiplexer in a
+		// loop: consume [magic], read [length][flags][body], and
+		// either run RunResponderRound (Table frame) or apply
+		// records (Reply followup). Real production callers wire
+		// this through the engine's frame dispatch — the test
 		// inlines it because there's no engine here.
-		if err := consumeReconcileMagic(connB); err != nil {
-			responderErr = err
-			return
+		for {
+			if err := consumeReconcileMagic(connB); err != nil {
+				return
+			}
+			flags, body, err := readReconcileFrame(connB)
+			if err != nil {
+				responderErr = err
+				return
+			}
+			switch flags {
+			case ReconcileFlagTable:
+				if err := driverB.RunResponderRound(connB, body); err != nil {
+					responderErr = err
+					return
+				}
+			case ReconcileFlagReply:
+				recs, _ := codec.DecodeReply(body)
+				for _, r := range recs {
+					_ = storeB.Apply(r)
+				}
+				return
+			default:
+				responderErr = io.ErrUnexpectedEOF
+				return
+			}
 		}
-		flags, body, err := readReconcileFrame(connB)
-		if err != nil {
-			responderErr = err
-			return
-		}
-		if flags != ReconcileFlagTable {
-			responderErr = io.ErrUnexpectedEOF
-			return
-		}
-		responderErr = driverB.RunResponderRound(connB, body)
 	}()
 
 	applied, sent, err := driverA.RunInitiatorRound("B", 5*time.Second)
