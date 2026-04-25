@@ -70,12 +70,17 @@ type FingerprintProvider interface {
 	Fingerprint() uint64
 }
 
-// GossipEventKind identifies an out-of-band event the responder loop
-// observed. Consumers subscribe via Engine.SubscribeEvents to react
-// without reaching into handler internals.
+// GossipEventKind identifies a protocol-level event consumers can
+// subscribe to via Engine.SubscribeEvents. The kind enum is
+// open-ended — new kinds are added by Phase as the protocol grows
+// (rumor ACK, reconciliation, snapshot, hypercube re-shape, network
+// policy transition). Existing kinds keep their numeric values to
+// stay wire-stable across mixed-version meshes.
 type GossipEventKind int
 
 const (
+	// Phase 0/1 (already shipped):
+
 	// EventDigestMatch fires when a G2 probe found local and peer
 	// fingerprints equal — consumers typically update per-peer
 	// watermarks to avoid re-exchanging already-converged state.
@@ -93,13 +98,103 @@ const (
 	// recovered from (non-fatal; fatal errors exit the loop
 	// without producing an event).
 	EventFrameError
+
+	// Phase 2 (rumor primary):
+
+	// EventRumorSent fires when the rumor pusher emitted a G3 frame
+	// to a peer.
+	EventRumorSent
+
+	// EventRumorAcked fires when a G3-ACK was received for an
+	// outstanding rumor — confirms delivery.
+	EventRumorAcked
+
+	// EventRumorRetry fires when ACK timeout triggered a retry via
+	// an alternate hypercube edge.
+	EventRumorRetry
+
+	// EventRumorDropped fires when a rumor exhausted its retry budget
+	// (typically 3) and was deferred to the next freshness sweep.
+	EventRumorDropped
+
+	// EventFreshnessSignal fires when a digest mismatch on the
+	// freshness bus triggered an on-demand exchange.
+	EventFreshnessSignal
+
+	// Phase 3 (reconciliation):
+
+	// EventReconcileStart fires when an IBLT reconciliation round
+	// began with a peer.
+	EventReconcileStart
+
+	// EventReconcileComplete fires when reconciliation decoded
+	// successfully and records were exchanged.
+	EventReconcileComplete
+
+	// EventReconcileDecodeFailure fires when peeling decode failed,
+	// triggering a mode-flip from rate-1.5 to rateless or a
+	// fallback to G1 + watermark.
+	EventReconcileDecodeFailure
+
+	// Phase 5 (snapshot):
+
+	// EventSnapshotStart fires when a cold-start snapshot exchange
+	// began.
+	EventSnapshotStart
+
+	// EventSnapshotComplete fires when snapshot reconstruction
+	// finished and records were applied.
+	EventSnapshotComplete
+
+	// EventSnapshotShardFailure fires on Reed-Solomon shard
+	// recovery — observable signal that a neighbor missed but
+	// the parity shard saved the transfer.
+	EventSnapshotShardFailure
+
+	// Phase 6 (hypercube):
+
+	// EventHypercubeRebuild fires on every cube re-shape (lazy or
+	// eager).
+	EventHypercubeRebuild
+
+	// EventHypercubeNeighborPromoted fires when an ambient session
+	// became a hypercube neighbor.
+	EventHypercubeNeighborPromoted
+
+	// EventHypercubeNeighborDemoted fires when a hypercube neighbor
+	// was demoted to ambient (still connected, no longer a
+	// proactive-dial target).
+	EventHypercubeNeighborDemoted
+
+	// Phase 7 (network policy):
+
+	// EventNetworkPolicyTransition fires when the policy synthesizer
+	// produced a new profile in response to signal changes.
+	EventNetworkPolicyTransition
+
+	// EventCapabilityNegotiated fires when a peer's capability
+	// advertisement was applied to the per-peer feature set.
+	EventCapabilityNegotiated
 )
 
 // GossipEvent is the payload for SubscribeEvents subscribers.
+// Optional fields are populated when the producing handler has the
+// data; consumers use zero-value detection to know what's available.
+//
+// The shape was kept compact for the original four event kinds; the
+// later additions accept it as-is rather than introduce a parallel
+// MeshEvent type. Callers that need richer per-kind detail attach
+// the fields they care about (e.g. reconciliation handlers populate
+// Bytes + Records + DurationMs).
 type GossipEvent struct {
-	Kind       GossipEventKind
-	PeerNodeID string
-	Time       time.Time
+	Kind        GossipEventKind
+	PeerNodeID  string
+	Time        time.Time
+	Topic       string        // optional — populated by topic-aware events
+	Bytes       int64         // optional — payload size
+	Records     int           // optional — record count
+	DurationMs  int64         // optional — operation duration
+	Err         string        // optional — error description
 }
 
 // responderConfig groups the tunables the responder loop consults.
@@ -284,6 +379,16 @@ func (e *Engine) RegisterFrameKind(magic uint16, handler FrameHandler) error {
 	return nil
 }
 
+// EventBus returns the engine's event bus, lazily creating it.
+// Used by sibling components (rumor pusher, reconcile driver,
+// snapshot driver) that emit events outside the responder loop.
+func (e *Engine) EventBus() *eventBus {
+	if e.resp.eventBus == nil {
+		e.resp.eventBus = &eventBus{}
+	}
+	return e.resp.eventBus
+}
+
 // SubscribeEvents registers a non-blocking subscriber for gossip
 // events. Unbuffered or slow channels drop events. Safe for
 // concurrent use.
@@ -418,6 +523,25 @@ func (c *responderConfig) ensureDefaults(e *Engine) {
 		}
 		c.handlers[RumorMagic] = &rumorHandler{cfg: c, engine: e}
 	}
+	// Wire the G3-ACK handler when a rumor pusher exists. Receives
+	// incoming ACKs and dispatches them into the pusher's tracker.
+	// Single-direction wiring: the rumor handler also writes ACKs
+	// back on the receive path when ACKs are enabled.
+	if _, ok := c.handlers[RumorACKMagic]; !ok && e.rumor != nil {
+		c.handlers[RumorACKMagic] = &rumorACKHandler{engine: e}
+	}
+	// G4 reconciliation handler — dispatches TableFrame body bytes
+	// into the consumer's ReconcileDriver. Wires up only when a
+	// driver is supplied via WithReconcile; otherwise G4 frames are
+	// unknown magic and the loop exits cleanly so peers fall back
+	// to G1 + DeltaTracker.
+	if _, ok := c.handlers[ReconcileMagic]; !ok && e.reconcile != nil {
+		c.handlers[ReconcileMagic] = &reconcileHandler{cfg: c, driver: e.reconcile}
+	}
+	// G5 snapshot handler — same conditional wiring as G4.
+	if _, ok := c.handlers[SnapshotMagic]; !ok && e.snapshot != nil {
+		c.handlers[SnapshotMagic] = &snapshotHandler{cfg: c, driver: e.snapshot}
+	}
 	if c.fatalClassifier == nil {
 		c.fatalClassifier = defaultFatalClassifier
 	}
@@ -517,6 +641,25 @@ func (h *digestHandler) Handle(_ context.Context, conn net.Conn, peerNodeID stri
 	return FrameContinue
 }
 
+// rumorACKHandler is the built-in G3-ACK handler. Reads the rumor ID
+// from the frame and dispatches into the engine's RumorPusher's
+// pending-ACK tracker. No-op when ACKs aren't enabled on the pusher.
+type rumorACKHandler struct {
+	engine *Engine
+}
+
+// Handle implements FrameHandler.
+func (h *rumorACKHandler) Handle(_ context.Context, conn net.Conn, peerNodeID string) FrameAction {
+	rumorID, err := ReadRumorACKBody(conn)
+	if err != nil {
+		return FrameContinue
+	}
+	if h.engine.rumor != nil {
+		h.engine.rumor.HandleACK(string(rumorID), peerNodeID)
+	}
+	return FrameContinue
+}
+
 // rumorHandler is the built-in G3 handler — wraps HandleRumorFrame
 // with the configured dedup fn + apply fn.
 type rumorHandler struct {
@@ -536,8 +679,34 @@ func (h *rumorHandler) Handle(_ context.Context, conn net.Conn, peerNodeID strin
 		}
 		return FrameContinue
 	}
-	HandleRumorFrame(conn, h.cfg.rumorTracker, h.engine.rumor, peerNodeID,
-		h.cfg.rumorDedupFn, h.cfg.rumorApplyFn)
+	// Read the body once so we can inspect for ACK emission. Mirrors
+	// HandleRumorFrame's flow but keeps the payload accessible after
+	// apply for the ACK write-back.
+	payload, hopCount, fromDim, err := ReadRumorBody(conn)
+	if err != nil {
+		if h.cfg.classifyFatal(err) {
+			return FrameFail
+		}
+		return FrameContinue
+	}
+	rumorID := h.cfg.rumorDedupFn(payload)
+	if !h.cfg.rumorTracker.IsSeen(rumorID) {
+		h.cfg.rumorTracker.MarkSeen(rumorID)
+		applyErr := h.cfg.rumorApplyFn(payload)
+		if applyErr == nil {
+			// Forward via hypercube/random fanout (excluding the
+			// sender) when not at the hop limit.
+			if h.cfg.rumorTracker.ShouldForward(hopCount) && h.engine.rumor != nil {
+				h.engine.rumor.PushRumorExcluding(payload, hopCount, fromDim, peerNodeID)
+			}
+			// Write G3-ACK back on the same stream. The pusher on
+			// the originator's side will match (rumorID, peerNodeID)
+			// and clear the pending entry. Best-effort: an ACK write
+			// failure isn't a protocol error — the originator's
+			// retry budget covers it.
+			_ = WriteRumorACK(conn, []byte(rumorID))
+		}
+	}
 	h.cfg.emit(EventRumorReceived, peerNodeID)
 	return FrameContinue
 }

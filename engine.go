@@ -32,6 +32,9 @@ type Engine struct {
 	backpressure *BackpressureMonitor
 	rumor        *RumorPusher
 	rateLimiter  *RateLimiter
+	policy       NetworkPolicy
+	reconcile    *ReconcileDriver
+	snapshot     *SnapshotDriver
 
 	mu          sync.RWMutex
 	subscribers map[string][]Subscriber
@@ -98,6 +101,32 @@ func WithBackpressure(bp *BackpressureMonitor) EngineOption {
 // WithRumor enables rumor-mongering (G3 immediate push).
 func WithRumor(r *RumorPusher) EngineOption {
 	return func(e *Engine) { e.rumor = r }
+}
+
+// WithNetworkPolicy wires the engine's policy-aware components
+// (rumor retry timing, gossip cadence ceiling, reconciliation
+// pacing) to consult a shared NetworkPolicy. Without this option
+// every component falls back to its hard-coded defaults — same
+// behavior as today.
+func WithNetworkPolicy(p NetworkPolicy) EngineOption {
+	return func(e *Engine) { e.policy = p }
+}
+
+// WithReconcile wires a ReconcileDriver into the engine so the
+// G4 frame handler dispatches inbound TableFrames into the driver's
+// RunResponderRound. Without this option the engine's responder
+// loop returns "unknown frame magic" on G4 frames — peers must
+// fall back to G1 + DeltaTracker.
+func WithReconcile(d *ReconcileDriver) EngineOption {
+	return func(e *Engine) { e.reconcile = d }
+}
+
+// WithSnapshot wires a SnapshotDriver into the engine so the G5
+// frame handler dispatches inbound ManifestRequest / ShardRequest
+// frames into the driver. Without this option G5 frames return
+// "unknown magic" and cold-start falls back to G1 full sync.
+func WithSnapshot(d *SnapshotDriver) EngineOption {
+	return func(e *Engine) { e.snapshot = d }
 }
 
 // WithExchangeFunc sets the wire-format-specific exchange function.
