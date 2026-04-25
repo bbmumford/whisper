@@ -256,9 +256,11 @@ func (d *ReconcileDriver) RunInitiatorRound(nodeID string, timeout time.Duration
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	deadline := time.Now().Add(timeout)
-	_ = p.Conn.SetReadDeadline(deadline)
-	defer func() { _ = p.Conn.SetReadDeadline(time.Time{}) }()
+	// NO SetReadDeadline here — aether StreamConn's underlying noise
+	// stream flushes its read buffer when SetDeadline is called,
+	// killing the session mid-frame. The Aether session's own
+	// keepalive timeout bounds the read instead.
+	_ = timeout
 
 	gotReply := false
 	gotRequest := false
@@ -393,14 +395,12 @@ func (d *ReconcileDriver) RunResponderRound(conn net.Conn, body []byte) error {
 	// initial table frame, but the follow-up reply travels over the
 	// same conn and we must consume its magic manually.
 	//
-	// 10-sec deadline so a stalled or non-G4-speaking initiator can't
-	// pin the responder's frame loop forever — without this, a peer
-	// that crashed mid-round leaves us blocked on a Read that never
-	// returns until the underlying session times out (potentially
-	// minutes), starving every other inbound frame on the same
-	// stream.
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	// NO SetReadDeadline here — the underlying aether StreamConn
+	// flushes its read buffer when SetDeadline is called mid-frame,
+	// which kills the session. The natural Aether session timeout
+	// (multi-second) is the bound on this read; a stalled initiator
+	// surfaces as "session closed" through the existing teardown
+	// path.
 	if err := consumeReconcileMagic(conn); err != nil {
 		return fmt.Errorf("reconcile: responder read followup magic: %w", err)
 	}
