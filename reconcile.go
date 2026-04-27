@@ -258,59 +258,94 @@ func (d *ReconcileDriver) RunInitiatorRound(nodeID string, timeout time.Duration
 	}
 	// NO SetReadDeadline here — aether StreamConn's underlying noise
 	// stream flushes its read buffer when SetDeadline is called,
-	// killing the session mid-frame. The Aether session's own
-	// keepalive timeout bounds the read instead.
-	_ = timeout
-
-	gotReply := false
-	gotRequest := false
-	decodeFailed := false
-	var requestedIDs []iblt.Key
-
-	for !gotReply || !gotRequest {
-		// Consume the [magic] prefix the responder writes via
-		// writeReconcileFrame. On the engine path the frame
-		// dispatcher consumes magic and routes to the handler;
-		// the initiator side has no engine in front of it so it
-		// must consume magic itself before reading the rest of
-		// the frame.
-		if err := consumeReconcileMagic(p.Conn); err != nil {
-			return applied, sent, fmt.Errorf("reconcile: read magic: %w", err)
-		}
-		flags, body, err := readReconcileFrame(p.Conn)
-		if err != nil {
-			return applied, sent, fmt.Errorf("reconcile: read: %w", err)
-		}
-		switch flags {
-		case ReconcileFlagReply:
-			recs, err := d.codec.DecodeReply(body)
-			if err != nil {
-				return applied, sent, fmt.Errorf("reconcile: decode reply: %w", err)
-			}
-			for _, r := range recs {
-				if applyErr := d.store.Apply(r); applyErr == nil {
-					applied++
-				}
-			}
-			gotReply = true
-		case ReconcileFlagRequest:
-			ids, err := d.codec.DecodeRequest(body)
-			if err != nil {
-				return applied, sent, fmt.Errorf("reconcile: decode request: %w", err)
-			}
-			requestedIDs = ids
-			gotRequest = true
-		case ReconcileFlagDecodeFailed:
-			// Responder couldn't decode our table — peer's mode-flip
-			// state machine treats this as a true failure. Break out
-			// of the read loop early; no reply or request is coming.
-			decodeFailed = true
-			gotReply = true
-			gotRequest = true
-		default:
-			// Unknown flag — skip and continue.
-		}
+	// killing the session mid-frame. Instead we run the read loop on
+	// a goroutine and select on a timer; if the timer fires, we
+	// return early with a timeout error. The read goroutine continues
+	// until the underlying conn closes (which happens within ~30s via
+	// aether's session-stall watchdog), so the leak is bounded.
+	type roundResult struct {
+		applied, sent int
+		decodeFailed  bool
+		requestedIDs  []iblt.Key
+		err           error
 	}
+	resultCh := make(chan roundResult, 1)
+	go func() {
+		var local roundResult
+		gotReply := false
+		gotRequest := false
+		for !gotReply || !gotRequest {
+			// Consume the [magic] prefix the responder writes via
+			// writeReconcileFrame. On the engine path the frame
+			// dispatcher consumes magic and routes to the handler;
+			// the initiator side has no engine in front of it so it
+			// must consume magic itself before reading the rest of
+			// the frame.
+			if err := consumeReconcileMagic(p.Conn); err != nil {
+				local.err = fmt.Errorf("reconcile: read magic: %w", err)
+				resultCh <- local
+				return
+			}
+			flags, body, err := readReconcileFrame(p.Conn)
+			if err != nil {
+				local.err = fmt.Errorf("reconcile: read: %w", err)
+				resultCh <- local
+				return
+			}
+			switch flags {
+			case ReconcileFlagReply:
+				recs, err := d.codec.DecodeReply(body)
+				if err != nil {
+					local.err = fmt.Errorf("reconcile: decode reply: %w", err)
+					resultCh <- local
+					return
+				}
+				for _, r := range recs {
+					if applyErr := d.store.Apply(r); applyErr == nil {
+						local.applied++
+					}
+				}
+				gotReply = true
+			case ReconcileFlagRequest:
+				ids, err := d.codec.DecodeRequest(body)
+				if err != nil {
+					local.err = fmt.Errorf("reconcile: decode request: %w", err)
+					resultCh <- local
+					return
+				}
+				local.requestedIDs = ids
+				gotRequest = true
+			case ReconcileFlagDecodeFailed:
+				// Responder couldn't decode our table — peer's mode-flip
+				// state machine treats this as a true failure. Break out
+				// of the read loop early; no reply or request is coming.
+				local.decodeFailed = true
+				gotReply = true
+				gotRequest = true
+			default:
+				// Unknown flag — skip and continue.
+			}
+		}
+		resultCh <- local
+	}()
+
+	var res roundResult
+	timer := time.NewTimer(timeout)
+	select {
+	case res = <-resultCh:
+		timer.Stop()
+		if res.err != nil {
+			return res.applied, res.sent, res.err
+		}
+	case <-timer.C:
+		// Read goroutine still hung on conn read. Surface a timeout
+		// error so the caller can fall back to G1 instead of waiting
+		// for the aether watchdog (30s) to close the conn.
+		return 0, 0, fmt.Errorf("reconcile: timeout after %v", timeout)
+	}
+	applied = res.applied
+	decodeFailed := res.decodeFailed
+	requestedIDs := res.requestedIDs
 
 	// Send the records the peer requested. Skip on decode failure —
 	// no IDs were transmitted so there's nothing to fulfil.
