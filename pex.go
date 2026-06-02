@@ -48,8 +48,33 @@ const PEXMaxKnownPeers = 500
 const PEXMaxRateLimitEntries = 500
 
 // pexSignaturePayload builds the canonical byte string signed by the entry's node.
-// Format: "PEX:v1:<nodeID>:<addr1>,<addr2>,...:<signedAt RFC3339>"
-func pexSignaturePayload(nodeID string, addresses []string, signedAt time.Time) []byte {
+// Format: "PEX:v2:<region>:<nodeID>:<addr1>,<addr2>,...:<signedAt RFC3339>"
+//
+// v2 (current) includes the region prefix so a peer cannot spoof another
+// peer's region by re-signing a captured PEX entry with the same
+// (nodeID, addresses, signedAt) tuple and a different region. v1
+// payloads exist on legacy traffic but never co-exist with v2 on a
+// signing node — every signer bumps to v2 when it adopts this
+// version, and verifiers fall back to v1 only when the v2 verify
+// fails (preserving compatibility with peers that haven't yet
+// shipped the bump).
+func pexSignaturePayload(nodeID, region string, addresses []string, signedAt time.Time) []byte {
+	msg := fmt.Sprintf("PEX:v2:%s:%s:", region, nodeID)
+	for i, addr := range addresses {
+		if i > 0 {
+			msg += ","
+		}
+		msg += addr
+	}
+	msg += ":" + signedAt.UTC().Format(time.RFC3339)
+	return []byte(msg)
+}
+
+// pexSignaturePayloadV1 retains the v1 canonical byte string for
+// backwards-compatible verification of legacy entries that signed
+// before the v2 region-inclusive payload landed. Signers MUST NOT use
+// this — call pexSignaturePayload.
+func pexSignaturePayloadV1(nodeID string, addresses []string, signedAt time.Time) []byte {
 	msg := fmt.Sprintf("PEX:v1:%s:", nodeID)
 	for i, addr := range addresses {
 		if i > 0 {
@@ -61,10 +86,13 @@ func pexSignaturePayload(nodeID string, addresses []string, signedAt time.Time) 
 	return []byte(msg)
 }
 
-// SignPEXEntry creates a signed PEX entry for the local node.
+// SignPEXEntry creates a signed PEX entry for the local node. region
+// is now part of the signed payload — a peer cannot forge another
+// peer's region by re-publishing its entry with a tampered Region
+// field.
 func SignPEXEntry(nodeID string, addresses []string, region string, privateKey ed25519.PrivateKey) PEXEntry {
 	now := time.Now().UTC()
-	payload := pexSignaturePayload(nodeID, addresses, now)
+	payload := pexSignaturePayload(nodeID, region, addresses, now)
 	sig := ed25519.Sign(privateKey, payload)
 	return PEXEntry{
 		NodeID:    nodeID,
@@ -76,13 +104,27 @@ func SignPEXEntry(nodeID string, addresses []string, region string, privateKey e
 }
 
 // VerifyPEXEntry checks the ed25519 signature on a PEX entry.
-// The publicKey must correspond to the entry's NodeID (looked up from LAD member records).
+// The publicKey must correspond to the entry's NodeID (looked up from
+// LAD member records).
+//
+// Verifies against the v2 region-inclusive payload first; falls back
+// to v1 for peers that haven't yet bumped. A peer publishing v1 + a
+// tampered Region survives v1 verify but the receiver still treats
+// the entry as "region unknown" because the v1 payload does not
+// authenticate the region — operational code that depends on signed
+// region MUST consult the payload version (not yet surfaced as a
+// public field; consumers should treat v1 entries as region-untrusted
+// until the fleet is fully on v2).
 func VerifyPEXEntry(entry PEXEntry, publicKey ed25519.PublicKey) bool {
 	if len(entry.Signature) == 0 || len(publicKey) == 0 {
 		return false
 	}
-	payload := pexSignaturePayload(entry.NodeID, entry.Addresses, entry.SignedAt)
-	return ed25519.Verify(publicKey, payload, entry.Signature)
+	v2 := pexSignaturePayload(entry.NodeID, entry.Region, entry.Addresses, entry.SignedAt)
+	if ed25519.Verify(publicKey, v2, entry.Signature) {
+		return true
+	}
+	v1 := pexSignaturePayloadV1(entry.NodeID, entry.Addresses, entry.SignedAt)
+	return ed25519.Verify(publicKey, v1, entry.Signature)
 }
 
 // IsStalePEXEntry returns true if the entry is older than PEXMaxAge.
