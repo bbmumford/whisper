@@ -596,7 +596,7 @@ func defaultFatalClassifier(err error) bool {
 	if err == nil {
 		return false
 	}
-	if err == io.EOF || err == io.ErrUnexpectedEOF {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	s := err.Error()

@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v6.33.4
-// source: pb/envelope.proto
+// source: envelope.proto
 
 package pb
 
@@ -55,11 +55,11 @@ func (x TopicMode) String() string {
 }
 
 func (TopicMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_pb_envelope_proto_enumTypes[0].Descriptor()
+	return file_envelope_proto_enumTypes[0].Descriptor()
 }
 
 func (TopicMode) Type() protoreflect.EnumType {
-	return &file_pb_envelope_proto_enumTypes[0]
+	return &file_envelope_proto_enumTypes[0]
 }
 
 func (x TopicMode) Number() protoreflect.EnumNumber {
@@ -68,7 +68,7 @@ func (x TopicMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TopicMode.Descriptor instead.
 func (TopicMode) EnumDescriptor() ([]byte, []int) {
-	return file_pb_envelope_proto_rawDescGZIP(), []int{0}
+	return file_envelope_proto_rawDescGZIP(), []int{0}
 }
 
 // GossipEnvelope is the wire format for gossip exchanges.
@@ -87,7 +87,7 @@ type GossipEnvelope struct {
 
 func (x *GossipEnvelope) Reset() {
 	*x = GossipEnvelope{}
-	mi := &file_pb_envelope_proto_msgTypes[0]
+	mi := &file_envelope_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -99,7 +99,7 @@ func (x *GossipEnvelope) String() string {
 func (*GossipEnvelope) ProtoMessage() {}
 
 func (x *GossipEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_pb_envelope_proto_msgTypes[0]
+	mi := &file_envelope_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -112,7 +112,7 @@ func (x *GossipEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GossipEnvelope.ProtoReflect.Descriptor instead.
 func (*GossipEnvelope) Descriptor() ([]byte, []int) {
-	return file_pb_envelope_proto_rawDescGZIP(), []int{0}
+	return file_envelope_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *GossipEnvelope) GetMeta() *ExchangeMeta {
@@ -164,7 +164,7 @@ type ExchangeMeta struct {
 
 func (x *ExchangeMeta) Reset() {
 	*x = ExchangeMeta{}
-	mi := &file_pb_envelope_proto_msgTypes[1]
+	mi := &file_envelope_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -176,7 +176,7 @@ func (x *ExchangeMeta) String() string {
 func (*ExchangeMeta) ProtoMessage() {}
 
 func (x *ExchangeMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_pb_envelope_proto_msgTypes[1]
+	mi := &file_envelope_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -189,7 +189,7 @@ func (x *ExchangeMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExchangeMeta.ProtoReflect.Descriptor instead.
 func (*ExchangeMeta) Descriptor() ([]byte, []int) {
-	return file_pb_envelope_proto_rawDescGZIP(), []int{1}
+	return file_envelope_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ExchangeMeta) GetCacheFingerprint() uint64 {
@@ -256,19 +256,25 @@ func (x *ExchangeMeta) GetOffer() *ConnectionOffer {
 }
 
 // PEXEntry is a signed peer exchange advertisement.
+//
+// region carries the advertised node's Fly region so receivers can
+// apply same-region preference when picking probe targets. Without
+// this on the wire every received PEXEntry looks potentially
+// cross-region.
 type PEXEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	Addresses     []string               `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
 	TimestampUnix int64                  `protobuf:"varint,3,opt,name=timestamp_unix,json=timestampUnix,proto3" json:"timestamp_unix,omitempty"`
 	Signature     []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
+	Region        string                 `protobuf:"bytes,5,opt,name=region,proto3" json:"region,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PEXEntry) Reset() {
 	*x = PEXEntry{}
-	mi := &file_pb_envelope_proto_msgTypes[2]
+	mi := &file_envelope_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -280,7 +286,7 @@ func (x *PEXEntry) String() string {
 func (*PEXEntry) ProtoMessage() {}
 
 func (x *PEXEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_pb_envelope_proto_msgTypes[2]
+	mi := &file_envelope_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -293,7 +299,7 @@ func (x *PEXEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PEXEntry.ProtoReflect.Descriptor instead.
 func (*PEXEntry) Descriptor() ([]byte, []int) {
-	return file_pb_envelope_proto_rawDescGZIP(), []int{2}
+	return file_envelope_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *PEXEntry) GetNodeId() string {
@@ -324,6 +330,13 @@ func (x *PEXEntry) GetSignature() []byte {
 	return nil
 }
 
+func (x *PEXEntry) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
 // ConnectionOffer signals desire for a direct connection.
 type ConnectionOffer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -339,7 +352,7 @@ type ConnectionOffer struct {
 
 func (x *ConnectionOffer) Reset() {
 	*x = ConnectionOffer{}
-	mi := &file_pb_envelope_proto_msgTypes[3]
+	mi := &file_envelope_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -351,7 +364,7 @@ func (x *ConnectionOffer) String() string {
 func (*ConnectionOffer) ProtoMessage() {}
 
 func (x *ConnectionOffer) ProtoReflect() protoreflect.Message {
-	mi := &file_pb_envelope_proto_msgTypes[3]
+	mi := &file_envelope_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -364,7 +377,7 @@ func (x *ConnectionOffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionOffer.ProtoReflect.Descriptor instead.
 func (*ConnectionOffer) Descriptor() ([]byte, []int) {
-	return file_pb_envelope_proto_rawDescGZIP(), []int{3}
+	return file_envelope_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ConnectionOffer) GetFromNodeId() string {
@@ -409,11 +422,11 @@ func (x *ConnectionOffer) GetSignature() []byte {
 	return nil
 }
 
-var File_pb_envelope_proto protoreflect.FileDescriptor
+var File_envelope_proto protoreflect.FileDescriptor
 
-const file_pb_envelope_proto_rawDesc = "" +
+const file_envelope_proto_rawDesc = "" +
 	"\n" +
-	"\x11pb/envelope.proto\x12\n" +
+	"\x0eenvelope.proto\x12\n" +
 	"whisper.v1\"\x99\x01\n" +
 	"\x0eGossipEnvelope\x12,\n" +
 	"\x04meta\x18\x01 \x01(\v2\x18.whisper.v1.ExchangeMetaR\x04meta\x12\x14\n" +
@@ -433,12 +446,13 @@ const file_pb_envelope_proto_rawDesc = "" +
 	"\x05offer\x18\t \x01(\v2\x1b.whisper.v1.ConnectionOfferR\x05offer\x1aC\n" +
 	"\x15ConnectionCountsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\x86\x01\n" +
+	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\x9e\x01\n" +
 	"\bPEXEntry\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1c\n" +
 	"\taddresses\x18\x02 \x03(\tR\taddresses\x12%\n" +
 	"\x0etimestamp_unix\x18\x03 \x01(\x03R\rtimestampUnix\x12\x1c\n" +
-	"\tsignature\x18\x04 \x01(\fR\tsignature\"\xd2\x01\n" +
+	"\tsignature\x18\x04 \x01(\fR\tsignature\x12\x16\n" +
+	"\x06region\x18\x05 \x01(\tR\x06region\"\xd2\x01\n" +
 	"\x0fConnectionOffer\x12 \n" +
 	"\ffrom_node_id\x18\x01 \x01(\tR\n" +
 	"fromNodeId\x12\x1c\n" +
@@ -454,20 +468,20 @@ const file_pb_envelope_proto_rawDesc = "" +
 	"\x16TOPIC_REQUEST_RESPONSE\x10\x02B!Z\x1fgithub.com/bbmumford/whisper/pbb\x06proto3"
 
 var (
-	file_pb_envelope_proto_rawDescOnce sync.Once
-	file_pb_envelope_proto_rawDescData []byte
+	file_envelope_proto_rawDescOnce sync.Once
+	file_envelope_proto_rawDescData []byte
 )
 
-func file_pb_envelope_proto_rawDescGZIP() []byte {
-	file_pb_envelope_proto_rawDescOnce.Do(func() {
-		file_pb_envelope_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_pb_envelope_proto_rawDesc), len(file_pb_envelope_proto_rawDesc)))
+func file_envelope_proto_rawDescGZIP() []byte {
+	file_envelope_proto_rawDescOnce.Do(func() {
+		file_envelope_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_envelope_proto_rawDesc), len(file_envelope_proto_rawDesc)))
 	})
-	return file_pb_envelope_proto_rawDescData
+	return file_envelope_proto_rawDescData
 }
 
-var file_pb_envelope_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_pb_envelope_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
-var file_pb_envelope_proto_goTypes = []any{
+var file_envelope_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_envelope_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_envelope_proto_goTypes = []any{
 	(TopicMode)(0),          // 0: whisper.v1.TopicMode
 	(*GossipEnvelope)(nil),  // 1: whisper.v1.GossipEnvelope
 	(*ExchangeMeta)(nil),    // 2: whisper.v1.ExchangeMeta
@@ -475,7 +489,7 @@ var file_pb_envelope_proto_goTypes = []any{
 	(*ConnectionOffer)(nil), // 4: whisper.v1.ConnectionOffer
 	nil,                     // 5: whisper.v1.ExchangeMeta.ConnectionCountsEntry
 }
-var file_pb_envelope_proto_depIdxs = []int32{
+var file_envelope_proto_depIdxs = []int32{
 	2, // 0: whisper.v1.GossipEnvelope.meta:type_name -> whisper.v1.ExchangeMeta
 	0, // 1: whisper.v1.GossipEnvelope.mode:type_name -> whisper.v1.TopicMode
 	3, // 2: whisper.v1.ExchangeMeta.pex_entries:type_name -> whisper.v1.PEXEntry
@@ -488,27 +502,27 @@ var file_pb_envelope_proto_depIdxs = []int32{
 	0, // [0:5] is the sub-list for field type_name
 }
 
-func init() { file_pb_envelope_proto_init() }
-func file_pb_envelope_proto_init() {
-	if File_pb_envelope_proto != nil {
+func init() { file_envelope_proto_init() }
+func file_envelope_proto_init() {
+	if File_envelope_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pb_envelope_proto_rawDesc), len(file_pb_envelope_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_envelope_proto_rawDesc), len(file_envelope_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_pb_envelope_proto_goTypes,
-		DependencyIndexes: file_pb_envelope_proto_depIdxs,
-		EnumInfos:         file_pb_envelope_proto_enumTypes,
-		MessageInfos:      file_pb_envelope_proto_msgTypes,
+		GoTypes:           file_envelope_proto_goTypes,
+		DependencyIndexes: file_envelope_proto_depIdxs,
+		EnumInfos:         file_envelope_proto_enumTypes,
+		MessageInfos:      file_envelope_proto_msgTypes,
 	}.Build()
-	File_pb_envelope_proto = out.File
-	file_pb_envelope_proto_goTypes = nil
-	file_pb_envelope_proto_depIdxs = nil
+	File_envelope_proto = out.File
+	file_envelope_proto_goTypes = nil
+	file_envelope_proto_depIdxs = nil
 }

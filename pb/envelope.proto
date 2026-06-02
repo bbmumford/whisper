@@ -42,11 +42,17 @@ enum TopicMode {
 }
 
 // PEXEntry is a signed peer exchange advertisement.
+//
+// region carries the advertised node's Fly region so receivers can
+// apply same-region preference when picking probe targets. Without
+// this on the wire every received PEXEntry looks potentially
+// cross-region.
 message PEXEntry {
     string node_id = 1;
     repeated string addresses = 2;
     int64 timestamp_unix = 3;
     bytes signature = 4;
+    string region = 5;
 }
 
 // ConnectionOffer signals desire for a direct connection.
