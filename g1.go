@@ -195,8 +195,14 @@ func (h *g1Handler) Handle(ctx context.Context, conn net.Conn, peerNodeID string
 		return FrameContinue
 	}
 
-	result.NetworkRTT = time.Since(exchangeStart)
-	result.RTT = result.NetworkRTT
+	// Responder side: this handler is SERVING a request that already
+	// arrived on the wire. There is no full round trip to time — the
+	// only thing the responder could measure is its own serialize +
+	// local-write elapsed, which is not what consumers of NetworkRTT
+	// expect (they want the wire RTT to the peer). Leaving NetworkRTT
+	// and RTT at zero lets the initiator's measurement (in sync.go)
+	// remain the authoritative sample for the peer's lastRTT.
+	_ = exchangeStart
 
 	if h.g1.delta != nil && peerNodeID != "" {
 		h.g1.delta.UpdateWatermark(peerNodeID, time.Now())
