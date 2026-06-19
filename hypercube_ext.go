@@ -85,6 +85,12 @@ type HypercubeOptions struct {
 	//
 	// nil = no ephemerals (all members are cube candidates).
 	IsEphemeral func(nodeID string) bool
+
+	// CoordOf returns a node's Vivaldi network coordinate (and whether it is
+	// known). When set, RouteToFar uses predicted RTT to break ties among
+	// equal-XOR-distance next hops, preferring the latency-closest of them.
+	// nil = pure XOR-distance routing (today's behavior).
+	CoordOf func(nodeID string) (Coord, bool)
 }
 
 // HypercubeExt wraps the base Hypercube with the Phase 6 extension
@@ -348,24 +354,54 @@ func (h *HypercubeExt) RouteToFar(targetNodeID string) (nextHop string, ok bool)
 		return targetNodeID, true
 	}
 	// Pick the neighbor whose XOR with target has lowest popcount —
-	// nearest in hypercube space. Forward via that dimension.
+	// nearest in hypercube space. Forward via that dimension. All such
+	// neighbors reduce the XOR-popcount to the target equally, so collecting
+	// every best-popcount candidate and tie-breaking among them keeps the
+	// monotonic popcount decrease that makes routing loop-free.
 	dim := h.primary.Dimension()
-	bestDim := -1
 	bestPopcount := dim + 1
+	bestDims := make([]int, 0, dim)
 	for d := 0; d < dim; d++ {
 		neighborPos := selfPos ^ (1 << d)
 		if neighborPos >= len(members) {
 			continue
 		}
-		nxor := neighborPos ^ targetPos
-		if pc := popcount(nxor); pc < bestPopcount {
+		pc := popcount(neighborPos ^ targetPos)
+		switch {
+		case pc < bestPopcount:
 			bestPopcount = pc
-			bestDim = d
+			bestDims = append(bestDims[:0], d)
+		case pc == bestPopcount:
+			bestDims = append(bestDims, d)
 		}
 	}
-	if bestDim < 0 {
+	if len(bestDims) == 0 {
 		return "", false
 	}
+
+	bestDim := bestDims[0]
+	// Coord tie-break (stage d): among equal-progress next hops, prefer the one
+	// with the lowest predicted RTT to the target. Pure latency preference — it
+	// never changes which popcount tier we forward into, so loop-freedom holds.
+	if len(bestDims) > 1 && h.opts.CoordOf != nil {
+		if targetCoord, ok := h.opts.CoordOf(targetNodeID); ok {
+			bestRTT := 0.0
+			bestRTTSet := false
+			for _, d := range bestDims {
+				np := selfPos ^ (1 << d)
+				nc, nok := h.opts.CoordOf(members[np])
+				if !nok {
+					continue
+				}
+				if rtt := Distance(nc, targetCoord); !bestRTTSet || rtt < bestRTT {
+					bestRTT = rtt
+					bestDim = d
+					bestRTTSet = true
+				}
+			}
+		}
+	}
+
 	neighborPos := selfPos ^ (1 << bestDim)
 	if neighborPos >= len(members) {
 		return "", false
