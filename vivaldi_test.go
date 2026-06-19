@@ -81,3 +81,31 @@ func TestVivaldiConverges(t *testing.T) {
 		t.Fatalf("predicted RTT %g should converge near 40ms", pred)
 	}
 }
+
+// TestRouteToFarCoordTiebreak proves the stage-d coord tie-break: with members
+// A,B,C,D (positions 0..3), routing from A to D leaves B(1) and C(2) both one
+// XOR-bit from D — a tie. The coord tie-break forwards to whichever is closer in
+// latency space; without coords it falls to the first (lowest) dimension.
+func TestRouteToFarCoordTiebreak(t *testing.T) {
+	members := []string{"A", "B", "C", "D"}
+	coords := map[string]Coord{
+		"A": {Height: MinHeight},
+		"B": {X: 100, Height: MinHeight}, // far from D
+		"C": {X: 5, Height: MinHeight},   // near D
+		"D": {X: 6, Height: MinHeight},
+	}
+
+	h := NewHypercubeExt("A", HypercubeOptions{
+		CoordOf: func(id string) (Coord, bool) { c, ok := coords[id]; return c, ok },
+	})
+	h.Rebuild(members)
+	if hop, ok := h.RouteToFar("D"); !ok || hop != "C" {
+		t.Fatalf("coord tie-break should forward to C (latency-closest to D), got %q ok=%v", hop, ok)
+	}
+
+	bare := NewHypercubeExt("A", HypercubeOptions{})
+	bare.Rebuild(members)
+	if hop, ok := bare.RouteToFar("D"); !ok || hop != "B" {
+		t.Fatalf("without coords the tie falls to the first dimension (B), got %q ok=%v", hop, ok)
+	}
+}
