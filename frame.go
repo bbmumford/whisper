@@ -70,6 +70,17 @@ type FingerprintProvider interface {
 	Fingerprint() uint64
 }
 
+// BucketFingerprintProvider is the second-level diff source: a StateStore that
+// can partition its key set into `buckets` buckets and return a per-bucket XOR
+// digest. Invariant: XOR(BucketDigest(n)) == Fingerprint(). When a store
+// satisfies this AND the scalar G2 probe finds a mismatch, the digest handler
+// escalates to a bucket exchange so the divergence localises to a few buckets
+// instead of dumping the whole cache. Optional — a store with only Fingerprint
+// keeps the scalar-only G2 path.
+type BucketFingerprintProvider interface {
+	BucketDigest(buckets uint16) []uint64
+}
+
 // GossipEventKind identifies a protocol-level event consumers can
 // subscribe to via Engine.SubscribeEvents. The kind enum is
 // open-ended — new kinds are added by Phase as the protocol grows
@@ -175,6 +186,13 @@ const (
 	// EventCapabilityNegotiated fires when a peer's capability
 	// advertisement was applied to the per-peer feature set.
 	EventCapabilityNegotiated
+
+	// EventDigestBucketMismatch fires when a scalar G2 fingerprint
+	// mismatch escalated to a bucketed (G2B) exchange and the two
+	// bucket vectors disagreed. Records carries the number of diverging
+	// buckets; the follow-up G1 exchange is scoped to just those.
+	// Appended after the wire-stable kinds above — never renumbered.
+	EventDigestBucketMismatch
 )
 
 // GossipEvent is the payload for SubscribeEvents subscribers.
@@ -241,6 +259,15 @@ type responderConfig struct {
 	// for the default G2 handler to answer digest probes; nil disables
 	// G2 (probes are ignored, G1 always runs).
 	fingerprintProvider FingerprintProvider
+
+	// bucketFingerprintProvider, when set, lets the G2 handler escalate a
+	// scalar mismatch to a bucketed (G2B) exchange. Nil keeps the scalar-only
+	// path. Auto-wired from the StateStore when it satisfies BucketDigest.
+	bucketFingerprintProvider BucketFingerprintProvider
+
+	// digestBuckets is the bucket count N used for the G2B exchange. Zero
+	// defaults to defaultDigestBuckets (64); clamped to maxDigestBuckets.
+	digestBuckets uint16
 
 	// rumorTracker / rumorDedupFn / rumorApplyFn power the default G3
 	// handler. All three must be non-nil for G3 to be active; leaving
@@ -326,6 +353,19 @@ func WithMaxPayloadSize(n uint32) EngineOption {
 // source. Without this, G2 probes are dropped and G1 always runs.
 func WithFingerprintProvider(fp FingerprintProvider) EngineOption {
 	return func(e *Engine) { e.resp.fingerprintProvider = fp }
+}
+
+// WithBucketFingerprintProvider wires the second-level bucket-digest source so
+// the G2 handler can escalate a scalar mismatch to a bucketed (G2B) exchange.
+// Optional; auto-wired from the StateStore when it satisfies BucketDigest.
+func WithBucketFingerprintProvider(bp BucketFingerprintProvider) EngineOption {
+	return func(e *Engine) { e.resp.bucketFingerprintProvider = bp }
+}
+
+// WithDigestBuckets sets the bucket count N for the G2B exchange. Zero keeps
+// the default (defaultDigestBuckets); values above maxDigestBuckets are clamped.
+func WithDigestBuckets(n uint16) EngineOption {
+	return func(e *Engine) { e.resp.digestBuckets = n }
 }
 
 // WithRumorDedupKeyFunc sets the dedup key function for the default
@@ -506,6 +546,15 @@ func (c *responderConfig) ensureDefaults(e *Engine) {
 		// fingerprint source when native G1 is active.
 		if c.fingerprintProvider == nil {
 			c.fingerprintProvider = g1StoreFingerprint{store: e.g1.store}
+		}
+		// Second-level bucket digest: auto-wire when the store can produce one
+		// (type-assert keeps the StateStore interface addition non-breaking for
+		// stores that only have Fingerprint). Lets a scalar mismatch escalate to
+		// a bucket-scoped exchange instead of dumping the whole cache.
+		if c.bucketFingerprintProvider == nil {
+			if bp, ok := e.g1.store.(BucketFingerprintProvider); ok {
+				c.bucketFingerprintProvider = bp
+			}
 		}
 		c.handlers[GossipMagic] = &g1Handler{cfg: c, g1: &e.g1}
 	}
