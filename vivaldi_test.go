@@ -82,6 +82,25 @@ func TestVivaldiConverges(t *testing.T) {
 	}
 }
 
+// TestVivaldiGossipRendezvous covers the decode->sampler handoff: RecordGossip
+// stores a peer's coordinate, PeerGossip retrieves it, empty peerID is a no-op.
+func TestVivaldiGossipRendezvous(t *testing.T) {
+	v := NewVivaldiCoords()
+	if _, _, ok := v.PeerGossip("p"); ok {
+		t.Fatal("unknown peer gossip must be ok=false")
+	}
+	coord := Coord{X: 12, Y: -3, Height: MinHeight}
+	v.RecordGossip("p", coord, 0.4)
+	gc, ge, ok := v.PeerGossip("p")
+	if !ok || gc != coord || ge != 0.4 {
+		t.Fatalf("gossip round-trip mismatch: (%+v,%g,%v)", gc, ge, ok)
+	}
+	v.RecordGossip("", coord, 0.4) // empty peerID is a no-op
+	if len(v.peers) != 1 {
+		t.Fatal("empty peerID must not record a peer")
+	}
+}
+
 // TestRouteToFarCoordTiebreak proves the stage-d coord tie-break: with members
 // A,B,C,D (positions 0..3), routing from A to D leaves B(1) and C(2) both one
 // XOR-bit from D — a tie. The coord tie-break forwards to whichever is closer in

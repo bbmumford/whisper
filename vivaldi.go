@@ -17,9 +17,10 @@ const vivaldiEWMAAlpha = 0.3
 // peerCoordEntry is a peer's last-known gossiped coordinate plus an EWMA of the
 // predicted RTT to it.
 type peerCoordEntry struct {
-	coord    Coord
-	smoothed float64 // EWMA of predicted RTT (ms); 0 until the first observation
-	hasEWMA  bool
+	coord     Coord
+	gossipErr float64 // the peer's last-gossiped error estimate
+	smoothed  float64 // EWMA of predicted RTT (ms); 0 until the first observation
+	hasEWMA   bool
 }
 
 // VivaldiCoords is the stateful wrapper around the pure coordinate math: it
@@ -68,6 +69,35 @@ func (v *VivaldiCoords) Observe(peerID string, rtt time.Duration, peerCoord Coor
 		entry.hasEWMA = true
 	}
 	v.peers[peerID] = entry
+}
+
+// RecordGossip stores a peer's freshly-gossiped coordinate + error estimate
+// without folding an RTT sample. The decode path (which sees every record but
+// has no RTT) calls this so the RTT sampler (which has the RTT but not the
+// coordinate) can later retrieve a current coordinate via PeerGossip and fold
+// it through Observe. It does not touch the EWMA prediction state.
+func (v *VivaldiCoords) RecordGossip(peerID string, coord Coord, peerErr float64) {
+	if peerID == "" {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	entry := v.peers[peerID]
+	entry.coord = coord
+	entry.gossipErr = peerErr
+	v.peers[peerID] = entry
+}
+
+// PeerGossip returns a peer's last-gossiped coordinate + error, ok=false if it
+// has never been seen. The RTT sampler reads this to feed Observe.
+func (v *VivaldiCoords) PeerGossip(peerID string) (Coord, float64, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	entry, ok := v.peers[peerID]
+	if !ok {
+		return Coord{}, 0, false
+	}
+	return entry.coord, entry.gossipErr, true
 }
 
 // Self returns the current self coordinate and local error estimate (the value
