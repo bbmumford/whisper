@@ -234,6 +234,15 @@ func (h *g1Handler) buildOutboundMeta(peerNodeID string) *ExchangeMeta {
 // response — a delta when the peer has a watermark and hasn't hit
 // the full-sync interval, otherwise the full snapshot.
 func (h *g1Handler) selectOutboundRecords(peerNodeID string) [][]byte {
+	// Bucket-scoped follow-up: if a recent G2B exchange localised this peer's
+	// divergence to specific buckets and the store can serve them, send only
+	// those records instead of a full snapshot/delta. One-shot — the set is
+	// cleared on read, so the peer reverts to normal sync next exchange.
+	if peerNodeID != "" && h.cfg.bucketRecords != nil {
+		if n, want, ok := h.cfg.takeDivergingBuckets(peerNodeID); ok {
+			return h.cfg.bucketRecords.RecordsInBuckets(n, want)
+		}
+	}
 	dt := h.g1.delta
 	if dt == nil || peerNodeID == "" || dt.ShouldFullSync(peerNodeID) {
 		return h.g1.store.Snapshot()
