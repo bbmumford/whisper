@@ -81,6 +81,16 @@ type BucketFingerprintProvider interface {
 	BucketDigest(buckets uint16) []uint64
 }
 
+// BucketRecordsProvider is the optional StateStore extension that serves the
+// bucket-scoped follow-up: it returns the serialized records whose key falls in
+// one of the wanted buckets (want[i]==true selects bucket i), over the same
+// bucket partition BucketDigest uses. When a G2B exchange localises a peer's
+// divergence, the G1 handler serves RecordsInBuckets(N, diverging) instead of a
+// full Snapshot/Delta. Optional — a store without it always full-syncs.
+type BucketRecordsProvider interface {
+	RecordsInBuckets(buckets uint16, want []bool) [][]byte
+}
+
 // GossipEventKind identifies a protocol-level event consumers can
 // subscribe to via Engine.SubscribeEvents. The kind enum is
 // open-ended — new kinds are added by Phase as the protocol grows
@@ -269,6 +279,17 @@ type responderConfig struct {
 	// defaults to defaultDigestBuckets (64); clamped to maxDigestBuckets.
 	digestBuckets uint16
 
+	// bucketRecords, when set, lets the G1 handler serve only the records in a
+	// peer's diverging buckets after a G2B mismatch. Auto-wired from the
+	// StateStore when it satisfies BucketRecordsProvider.
+	bucketRecords BucketRecordsProvider
+
+	// divergingBuckets holds, per peer NodeID, the diverging-bucket set the G2B
+	// handler computed for the next G1 follow-up. Consumed (and cleared)
+	// one-shot by selectOutboundRecords. sync.Map keeps the gossip read path
+	// lock-free; values are divergingSet.
+	divergingBuckets sync.Map
+
 	// rumorTracker / rumorDedupFn / rumorApplyFn power the default G3
 	// handler. All three must be non-nil for G3 to be active; leaving
 	// any nil skips G3 frames (reading and discarding the body).
@@ -366,6 +387,13 @@ func WithBucketFingerprintProvider(bp BucketFingerprintProvider) EngineOption {
 // the default (defaultDigestBuckets); values above maxDigestBuckets are clamped.
 func WithDigestBuckets(n uint16) EngineOption {
 	return func(e *Engine) { e.resp.digestBuckets = n }
+}
+
+// WithBucketRecordsProvider wires the bucket-scoped record source so the G1
+// follow-up to a G2B mismatch serves only the diverging buckets. Optional;
+// auto-wired from the StateStore when it satisfies BucketRecordsProvider.
+func WithBucketRecordsProvider(br BucketRecordsProvider) EngineOption {
+	return func(e *Engine) { e.resp.bucketRecords = br }
 }
 
 // WithRumorDedupKeyFunc sets the dedup key function for the default
@@ -556,6 +584,13 @@ func (c *responderConfig) ensureDefaults(e *Engine) {
 				c.bucketFingerprintProvider = bp
 			}
 		}
+		// And the bucket-scoped record source, so the G1 follow-up to a G2B
+		// mismatch can serve only the diverging buckets.
+		if c.bucketRecords == nil {
+			if br, ok := e.g1.store.(BucketRecordsProvider); ok {
+				c.bucketRecords = br
+			}
+		}
 		c.handlers[GossipMagic] = &g1Handler{cfg: c, g1: &e.g1}
 	}
 	// Wire the rumor handler only when the engine has a rumor pusher
@@ -637,6 +672,34 @@ func (c *responderConfig) emit(kind GossipEventKind, peerNodeID string) {
 		return
 	}
 	c.eventBus.emit(GossipEvent{Kind: kind, PeerNodeID: peerNodeID, Time: time.Now()})
+}
+
+// divergingSet is the per-peer bucket-scoping the G2B handler stashes for the
+// next G1 follow-up: serve only the records in `want` over `n` buckets.
+type divergingSet struct {
+	n    uint16
+	want []bool
+}
+
+// setDivergingBuckets records the buckets that diverged with a peer so the next
+// G1 reply to that peer is bucket-scoped. Overwrites any prior unconsumed set.
+func (c *responderConfig) setDivergingBuckets(peerNodeID string, n uint16, want []bool) {
+	if peerNodeID == "" || n == 0 || len(want) == 0 {
+		return
+	}
+	c.divergingBuckets.Store(peerNodeID, divergingSet{n: n, want: want})
+}
+
+// takeDivergingBuckets returns and CLEARS a peer's diverging-bucket set — the
+// bucket-scoped reply is a one-shot; the peer reverts to full snapshot/delta on
+// the next exchange unless another mismatch re-arms it.
+func (c *responderConfig) takeDivergingBuckets(peerNodeID string) (uint16, []bool, bool) {
+	v, ok := c.divergingBuckets.LoadAndDelete(peerNodeID)
+	if !ok {
+		return 0, nil, false
+	}
+	ds := v.(divergingSet)
+	return ds.n, ds.want, true
 }
 
 // defaultFatalClassifier marks EOF/connection-reset/broken-pipe as
