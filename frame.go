@@ -593,6 +593,12 @@ func (c *responderConfig) ensureDefaults(e *Engine) {
 		}
 		c.handlers[GossipMagic] = &g1Handler{cfg: c, g1: &e.g1}
 	}
+	// G2B bucketed-digest handler — registered whenever a bucket-fingerprint
+	// source exists (explicitly wired or auto-wired from the store above).
+	// Without one, G2B frames are unknown magic and peers fall back to full G1.
+	if _, ok := c.handlers[DigestBucketMagic]; !ok && c.bucketFingerprintProvider != nil {
+		c.handlers[DigestBucketMagic] = &bucketDigestHandler{cfg: c}
+	}
 	// Wire the rumor handler only when the engine has a rumor pusher
 	// AND the consumer wired an apply fn. Without both, rumor frames
 	// have nowhere meaningful to go — better to leave the handler
@@ -674,6 +680,15 @@ func (c *responderConfig) emit(kind GossipEventKind, peerNodeID string) {
 	c.eventBus.emit(GossipEvent{Kind: kind, PeerNodeID: peerNodeID, Time: time.Now()})
 }
 
+// emitRecords publishes an event carrying a record count (e.g. the number of
+// diverging buckets for EventDigestBucketMismatch).
+func (c *responderConfig) emitRecords(kind GossipEventKind, peerNodeID string, records int) {
+	if c.eventBus == nil {
+		return
+	}
+	c.eventBus.emit(GossipEvent{Kind: kind, PeerNodeID: peerNodeID, Records: records, Time: time.Now()})
+}
+
 // divergingSet is the per-peer bucket-scoping the G2B handler stashes for the
 // next G1 follow-up: serve only the records in `want` over `n` buckets.
 type divergingSet struct {
@@ -749,6 +764,61 @@ func (h *digestHandler) Handle(_ context.Context, conn net.Conn, peerNodeID stri
 	}
 	if localFP != 0 && localFP == peerFP {
 		h.cfg.emit(EventDigestMatch, peerNodeID)
+	}
+	return FrameContinue
+}
+
+// bucketDigestHandler is the built-in G2B handler — the second-level diff after
+// a scalar G2 mismatch. It reads the peer's bucket-digest vector, replies with
+// its own bucket vector at the same N, computes the diverging buckets, and
+// stashes them so the next G1 reply to this peer is bucket-scoped. Requires a
+// BucketFingerprintProvider; without one the magic is simply unregistered and
+// peers fall back to full G1.
+type bucketDigestHandler struct {
+	cfg *responderConfig
+}
+
+// Handle implements FrameHandler.
+func (h *bucketDigestHandler) Handle(_ context.Context, conn net.Conn, peerNodeID string) FrameAction {
+	peerBuckets, _, err := ReadBucketDigestBody(conn)
+	if err != nil {
+		if h.cfg.classifyFatal(err) {
+			return FrameFail
+		}
+		h.cfg.emit(EventFrameError, peerNodeID)
+		return FrameContinue
+	}
+	if h.cfg.bucketFingerprintProvider == nil {
+		// Can't answer a bucket digest — nothing to compare against. The
+		// scalar G2 already signalled the mismatch, so the peer's normal G1
+		// will full-sync.
+		return FrameContinue
+	}
+	// Match the peer's bucket count so the vectors are comparable index-for-index.
+	n := uint16(len(peerBuckets)) //nolint:gosec // bounded by maxDigestBuckets in ReadBucketDigestBody
+	local := h.cfg.bucketFingerprintProvider.BucketDigest(n)
+
+	// Reply with our own vector so the peer can localise its side of the
+	// divergence too. Best-effort: a write failure just means this side won't
+	// serve bucket-scoped, the peer falls back to full G1.
+	if err := WriteBucketDigest(conn, local, 0); err != nil {
+		if h.cfg.classifyFatal(err) {
+			return FrameFail
+		}
+		return FrameContinue
+	}
+
+	want := make([]bool, n)
+	diverging := 0
+	for i := 0; i < int(n) && i < len(local) && i < len(peerBuckets); i++ {
+		if local[i] != peerBuckets[i] {
+			want[i] = true
+			diverging++
+		}
+	}
+	if diverging > 0 {
+		h.cfg.setDivergingBuckets(peerNodeID, n, want)
+		h.cfg.emitRecords(EventDigestBucketMismatch, peerNodeID, diverging)
 	}
 	return FrameContinue
 }
