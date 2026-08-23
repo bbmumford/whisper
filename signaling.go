@@ -14,18 +14,18 @@ import (
 // gossip to a direct transport connection.
 type ConnectionOffer struct {
 	// WantDirectConnect signals that the sender wants a direct connection.
-	WantDirectConnect bool `json:"want_direct,omitempty"`
+	WantDirectConnect bool `json:"wantDirect,omitempty"`
 
 	// OfferedTransports lists transports the sender can accept (e.g., "noise-udp", "websocket").
 	// Empty means "any available".
-	OfferedTransports []string `json:"offered_transports,omitempty"`
+	OfferedTransports []string `json:"offeredTransports,omitempty"`
 
 	// SenderNodeID is the offering node's identity. Populated by the exchange layer,
 	// not set by the caller.
 	SenderNodeID string `json:"-"`
 
 	// Timestamp when the offer was created. Used for deduplication.
-	Timestamp time.Time `json:"offer_ts,omitempty"`
+	Timestamp time.Time `json:"offerTs,omitempty"`
 }
 
 // ShouldInitiateDial implements the deterministic tiebreaker for simultaneous offers.
@@ -42,20 +42,20 @@ func ShouldInitiateDial(localNodeID, peerNodeID string) bool {
 // and connection map data. This is the wire format addition to each gossip exchange.
 type ExchangeMeta struct {
 	// Offer signals desire for a direct connection.
-	Offer *ConnectionOffer `json:"conn_offer,omitempty"`
+	Offer *ConnectionOffer `json:"connOffer,omitempty"`
 
 	// ConnectionCounts is the gossip-propagated connection map.
 	// Maps nodeID -> current inbound+outbound connection count.
-	ConnectionCounts map[string]int `json:"conn_counts,omitempty"`
+	ConnectionCounts map[string]int `json:"connCounts,omitempty"`
 
 	// PEXEntries carries signed peer advertisements piggybacked on gossip.
 	// Max PEXMaxEntriesPerExchange entries per exchange, rate-limited per peer.
-	PEXEntries []PEXEntry `json:"pex_entries,omitempty"`
+	PEXEntries []PEXEntry `json:"pexEntries,omitempty"`
 
 	// CacheFingerprint is an order-independent XOR hash of all cache keys.
 	// When two peers exchange fingerprints and they differ, the next exchange
 	// should be a full sync (not delta) to reconcile the divergence.
-	CacheFingerprint uint64 `json:"cache_fp,omitempty"`
+	CacheFingerprint uint64 `json:"cacheFp,omitempty"`
 
 	// BackpressureSignal indicates the sender is overwhelmed and cannot process
 	// gossip exchanges fast enough. When true, receiving peers should

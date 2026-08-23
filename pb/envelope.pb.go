@@ -146,16 +146,16 @@ func (x *GossipEnvelope) GetRecords() [][]byte {
 // ExchangeMeta carries per-exchange metadata piggybacked on gossip frames.
 type ExchangeMeta struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
-	CacheFingerprint   uint64                 `protobuf:"varint,1,opt,name=cache_fingerprint,json=cacheFingerprint,proto3" json:"cache_fingerprint,omitempty"`
+	CacheFingerprint   uint64                 `protobuf:"varint,1,opt,name=cacheFingerprint,proto3" json:"cacheFingerprint,omitempty"`
 	Region             string                 `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
-	BackpressureSignal bool                   `protobuf:"varint,3,opt,name=backpressure_signal,json=backpressureSignal,proto3" json:"backpressure_signal,omitempty"`
-	HlcWatermark       uint64                 `protobuf:"varint,4,opt,name=hlc_watermark,json=hlcWatermark,proto3" json:"hlc_watermark,omitempty"` // for delta sync
-	PeerId             []byte                 `protobuf:"bytes,5,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	BackpressureSignal bool                   `protobuf:"varint,3,opt,name=backpressureSignal,proto3" json:"backpressureSignal,omitempty"`
+	HlcWatermark       uint64                 `protobuf:"varint,4,opt,name=hlcWatermark,proto3" json:"hlcWatermark,omitempty"` // for delta sync
+	PeerId             []byte                 `protobuf:"bytes,5,opt,name=peerId,proto3" json:"peerId,omitempty"`
 	Timestamp          uint64                 `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	// PEX entries piggybacked on gossip
-	PexEntries []*PEXEntry `protobuf:"bytes,7,rep,name=pex_entries,json=pexEntries,proto3" json:"pex_entries,omitempty"`
+	PexEntries []*PEXEntry `protobuf:"bytes,7,rep,name=pexEntries,proto3" json:"pexEntries,omitempty"`
 	// Connection counts for load balancing
-	ConnectionCounts map[string]int32 `protobuf:"bytes,8,rep,name=connection_counts,json=connectionCounts,proto3" json:"connection_counts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	ConnectionCounts map[string]int32 `protobuf:"bytes,8,rep,name=connectionCounts,proto3" json:"connectionCounts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	// Connection offer for NAT traversal signaling
 	Offer         *ConnectionOffer `protobuf:"bytes,9,opt,name=offer,proto3" json:"offer,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -263,9 +263,9 @@ func (x *ExchangeMeta) GetOffer() *ConnectionOffer {
 // cross-region.
 type PEXEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=nodeId,proto3" json:"nodeId,omitempty"`
 	Addresses     []string               `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
-	TimestampUnix int64                  `protobuf:"varint,3,opt,name=timestamp_unix,json=timestampUnix,proto3" json:"timestamp_unix,omitempty"`
+	TimestampUnix int64                  `protobuf:"varint,3,opt,name=timestampUnix,proto3" json:"timestampUnix,omitempty"`
 	Signature     []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
 	Region        string                 `protobuf:"bytes,5,opt,name=region,proto3" json:"region,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -340,11 +340,11 @@ func (x *PEXEntry) GetRegion() string {
 // ConnectionOffer signals desire for a direct connection.
 type ConnectionOffer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	FromNodeId    string                 `protobuf:"bytes,1,opt,name=from_node_id,json=fromNodeId,proto3" json:"from_node_id,omitempty"`
-	ToNodeId      string                 `protobuf:"bytes,2,opt,name=to_node_id,json=toNodeId,proto3" json:"to_node_id,omitempty"`
+	FromNodeId    string                 `protobuf:"bytes,1,opt,name=fromNodeId,proto3" json:"fromNodeId,omitempty"`
+	ToNodeId      string                 `protobuf:"bytes,2,opt,name=toNodeId,proto3" json:"toNodeId,omitempty"`
 	Addresses     []string               `protobuf:"bytes,3,rep,name=addresses,proto3" json:"addresses,omitempty"`
 	Transport     string                 `protobuf:"bytes,4,opt,name=transport,proto3" json:"transport,omitempty"`
-	TimestampUnix int64                  `protobuf:"varint,5,opt,name=timestamp_unix,json=timestampUnix,proto3" json:"timestamp_unix,omitempty"`
+	TimestampUnix int64                  `protobuf:"varint,5,opt,name=timestampUnix,proto3" json:"timestampUnix,omitempty"`
 	Signature     []byte                 `protobuf:"bytes,6,opt,name=signature,proto3" json:"signature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -432,35 +432,36 @@ const file_envelope_proto_rawDesc = "" +
 	"\x04meta\x18\x01 \x01(\v2\x18.whisper.v1.ExchangeMetaR\x04meta\x12\x14\n" +
 	"\x05topic\x18\x02 \x01(\tR\x05topic\x12)\n" +
 	"\x04mode\x18\x03 \x01(\x0e2\x15.whisper.v1.TopicModeR\x04mode\x12\x18\n" +
-	"\arecords\x18\x04 \x03(\fR\arecords\"\xec\x03\n" +
-	"\fExchangeMeta\x12+\n" +
-	"\x11cache_fingerprint\x18\x01 \x01(\x04R\x10cacheFingerprint\x12\x16\n" +
-	"\x06region\x18\x02 \x01(\tR\x06region\x12/\n" +
-	"\x13backpressure_signal\x18\x03 \x01(\bR\x12backpressureSignal\x12#\n" +
-	"\rhlc_watermark\x18\x04 \x01(\x04R\fhlcWatermark\x12\x17\n" +
-	"\apeer_id\x18\x05 \x01(\fR\x06peerId\x12\x1c\n" +
-	"\ttimestamp\x18\x06 \x01(\x04R\ttimestamp\x125\n" +
-	"\vpex_entries\x18\a \x03(\v2\x14.whisper.v1.PEXEntryR\n" +
-	"pexEntries\x12[\n" +
-	"\x11connection_counts\x18\b \x03(\v2..whisper.v1.ExchangeMeta.ConnectionCountsEntryR\x10connectionCounts\x121\n" +
+	"\arecords\x18\x04 \x03(\fR\arecords\"\xe6\x03\n" +
+	"\fExchangeMeta\x12*\n" +
+	"\x10cacheFingerprint\x18\x01 \x01(\x04R\x10cacheFingerprint\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12.\n" +
+	"\x12backpressureSignal\x18\x03 \x01(\bR\x12backpressureSignal\x12\"\n" +
+	"\fhlcWatermark\x18\x04 \x01(\x04R\fhlcWatermark\x12\x16\n" +
+	"\x06peerId\x18\x05 \x01(\fR\x06peerId\x12\x1c\n" +
+	"\ttimestamp\x18\x06 \x01(\x04R\ttimestamp\x124\n" +
+	"\n" +
+	"pexEntries\x18\a \x03(\v2\x14.whisper.v1.PEXEntryR\n" +
+	"pexEntries\x12Z\n" +
+	"\x10connectionCounts\x18\b \x03(\v2..whisper.v1.ExchangeMeta.ConnectionCountsEntryR\x10connectionCounts\x121\n" +
 	"\x05offer\x18\t \x01(\v2\x1b.whisper.v1.ConnectionOfferR\x05offer\x1aC\n" +
 	"\x15ConnectionCountsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\x9e\x01\n" +
-	"\bPEXEntry\x12\x17\n" +
-	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1c\n" +
-	"\taddresses\x18\x02 \x03(\tR\taddresses\x12%\n" +
-	"\x0etimestamp_unix\x18\x03 \x01(\x03R\rtimestampUnix\x12\x1c\n" +
+	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\x9c\x01\n" +
+	"\bPEXEntry\x12\x16\n" +
+	"\x06nodeId\x18\x01 \x01(\tR\x06nodeId\x12\x1c\n" +
+	"\taddresses\x18\x02 \x03(\tR\taddresses\x12$\n" +
+	"\rtimestampUnix\x18\x03 \x01(\x03R\rtimestampUnix\x12\x1c\n" +
 	"\tsignature\x18\x04 \x01(\fR\tsignature\x12\x16\n" +
-	"\x06region\x18\x05 \x01(\tR\x06region\"\xd2\x01\n" +
-	"\x0fConnectionOffer\x12 \n" +
-	"\ffrom_node_id\x18\x01 \x01(\tR\n" +
-	"fromNodeId\x12\x1c\n" +
+	"\x06region\x18\x05 \x01(\tR\x06region\"\xcd\x01\n" +
+	"\x0fConnectionOffer\x12\x1e\n" +
 	"\n" +
-	"to_node_id\x18\x02 \x01(\tR\btoNodeId\x12\x1c\n" +
+	"fromNodeId\x18\x01 \x01(\tR\n" +
+	"fromNodeId\x12\x1a\n" +
+	"\btoNodeId\x18\x02 \x01(\tR\btoNodeId\x12\x1c\n" +
 	"\taddresses\x18\x03 \x03(\tR\taddresses\x12\x1c\n" +
-	"\ttransport\x18\x04 \x01(\tR\ttransport\x12%\n" +
-	"\x0etimestamp_unix\x18\x05 \x01(\x03R\rtimestampUnix\x12\x1c\n" +
+	"\ttransport\x18\x04 \x01(\tR\ttransport\x12$\n" +
+	"\rtimestampUnix\x18\x05 \x01(\x03R\rtimestampUnix\x12\x1c\n" +
 	"\tsignature\x18\x06 \x01(\fR\tsignature*P\n" +
 	"\tTopicMode\x12\x13\n" +
 	"\x0fTOPIC_BROADCAST\x10\x00\x12\x12\n" +
@@ -492,8 +493,8 @@ var file_envelope_proto_goTypes = []any{
 var file_envelope_proto_depIdxs = []int32{
 	2, // 0: whisper.v1.GossipEnvelope.meta:type_name -> whisper.v1.ExchangeMeta
 	0, // 1: whisper.v1.GossipEnvelope.mode:type_name -> whisper.v1.TopicMode
-	3, // 2: whisper.v1.ExchangeMeta.pex_entries:type_name -> whisper.v1.PEXEntry
-	5, // 3: whisper.v1.ExchangeMeta.connection_counts:type_name -> whisper.v1.ExchangeMeta.ConnectionCountsEntry
+	3, // 2: whisper.v1.ExchangeMeta.pexEntries:type_name -> whisper.v1.PEXEntry
+	5, // 3: whisper.v1.ExchangeMeta.connectionCounts:type_name -> whisper.v1.ExchangeMeta.ConnectionCountsEntry
 	4, // 4: whisper.v1.ExchangeMeta.offer:type_name -> whisper.v1.ConnectionOffer
 	5, // [5:5] is the sub-list for method output_type
 	5, // [5:5] is the sub-list for method input_type

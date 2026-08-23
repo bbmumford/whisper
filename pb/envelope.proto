@@ -17,18 +17,18 @@ message GossipEnvelope {
 
 // ExchangeMeta carries per-exchange metadata piggybacked on gossip frames.
 message ExchangeMeta {
-    uint64 cache_fingerprint = 1;
+    uint64 cacheFingerprint = 1;
     string region = 2;
-    bool backpressure_signal = 3;
-    uint64 hlc_watermark = 4;        // for delta sync
-    bytes peer_id = 5;
+    bool backpressureSignal = 3;
+    uint64 hlcWatermark = 4;        // for delta sync
+    bytes peerId = 5;
     uint64 timestamp = 6;
 
     // PEX entries piggybacked on gossip
-    repeated PEXEntry pex_entries = 7;
+    repeated PEXEntry pexEntries = 7;
 
     // Connection counts for load balancing
-    map<string, int32> connection_counts = 8;
+    map<string, int32> connectionCounts = 8;
 
     // Connection offer for NAT traversal signaling
     ConnectionOffer offer = 9;
@@ -48,19 +48,19 @@ enum TopicMode {
 // this on the wire every received PEXEntry looks potentially
 // cross-region.
 message PEXEntry {
-    string node_id = 1;
+    string nodeId = 1;
     repeated string addresses = 2;
-    int64 timestamp_unix = 3;
+    int64 timestampUnix = 3;
     bytes signature = 4;
     string region = 5;
 }
 
 // ConnectionOffer signals desire for a direct connection.
 message ConnectionOffer {
-    string from_node_id = 1;
-    string to_node_id = 2;
+    string fromNodeId = 1;
+    string toNodeId = 2;
     repeated string addresses = 3;
     string transport = 4;
-    int64 timestamp_unix = 5;
+    int64 timestampUnix = 5;
     bytes signature = 6;
 }

@@ -14,17 +14,17 @@ import (
 // PEXEntry represents a single peer advertisement in a Peer Exchange response.
 // Entries are signed by the advertising node's ed25519 key to prove ownership.
 type PEXEntry struct {
-	NodeID    string   `json:"node_id"`
+	NodeID    string   `json:"nodeId"`
 	Addresses []string `json:"addresses"`
 	Region    string   `json:"region"`
 	Signature []byte   `json:"signature"` // ed25519 sig over NodeID+Addresses+SignedAt
-	SignedAt  time.Time `json:"signed_at"`
+	SignedAt  time.Time `json:"signedAt"`
 }
 
 // PEXRequest is sent by a node to request peer lists from a connected peer.
 type PEXRequest struct {
-	RequestingNodeID string `json:"requesting_node_id"`
-	MaxEntries       int    `json:"max_entries,omitempty"` // 0 = use default (20)
+	RequestingNodeID string `json:"requestingNodeId"`
+	MaxEntries       int    `json:"maxEntries,omitempty"` // 0 = use default (20)
 }
 
 // PEXResponse contains the peer list from the responding node.
