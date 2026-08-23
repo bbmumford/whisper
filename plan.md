@@ -1,3 +1,9 @@
+---
+status: SHIPPED
+verified: 2026-07-03
+evidence: whisper v0.0.18 tagged (per outstanding-works A1: G2B bucketed-digest additions `WriteBucketDigest`/`ReadBucketDigestBody`/`DigestBucketMagic`/`BucketFingerprintProvider`). Package present in _PACKAGES/whisper with engine.go, adaptive.go, delta.go, digest.go, frame.go, coords.go, plus tests. Memory notes "Step 3 COMPLETE". HSTLES Library v0.0.412 consumes whisper; ORBTR Library at v0.0.28. Canonical package plan — kept in place, not archived.
+---
+
 # Whisper — Gossip Engine Extraction Plan
 
 > Extract the generic gossip engine from `mesh/core/directory/gossip/` (currently scoped for Aether extraction) into a standalone package: `github.com/bbmumford/whisper`.
