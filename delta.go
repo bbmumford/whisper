@@ -299,12 +299,12 @@ type DeltaSyncMeta struct {
 // state across process restarts. Keep field tags stable — they're the
 // disk schema for any backend that serialises this struct.
 type PersistedPeerState struct {
-	PeerID        string    `json:"peer_id"`
+	PeerID        string    `json:"peerId"`
 	Watermark     time.Time `json:"watermark"`
-	ExchangeCount int       `json:"exchange_count"`
-	LastActivity  time.Time `json:"last_activity"`
-	AppliedOnFull int       `json:"applied_on_full"`
-	FullSyncCount int       `json:"full_sync_count"`
+	ExchangeCount int       `json:"exchangeCount"`
+	LastActivity  time.Time `json:"lastActivity"`
+	AppliedOnFull int       `json:"appliedOnFull"`
+	FullSyncCount int       `json:"fullSyncCount"`
 }
 
 // DeltaPersistence is the storage backend the consumer supplies for
