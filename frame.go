@@ -215,14 +215,14 @@ const (
 // the fields they care about (e.g. reconciliation handlers populate
 // Bytes + Records + DurationMs).
 type GossipEvent struct {
-	Kind        GossipEventKind
-	PeerNodeID  string
-	Time        time.Time
-	Topic       string        // optional — populated by topic-aware events
-	Bytes       int64         // optional — payload size
-	Records     int           // optional — record count
-	DurationMs  int64         // optional — operation duration
-	Err         string        // optional — error description
+	Kind       GossipEventKind
+	PeerNodeID string
+	Time       time.Time
+	Topic      string // optional — populated by topic-aware events
+	Bytes      int64  // optional — payload size
+	Records    int    // optional — record count
+	DurationMs int64  // optional — operation duration
+	Err        string // optional — error description
 }
 
 // responderConfig groups the tunables the responder loop consults.
@@ -275,9 +275,16 @@ type responderConfig struct {
 	// path. Auto-wired from the StateStore when it satisfies BucketDigest.
 	bucketFingerprintProvider BucketFingerprintProvider
 
-	// digestBuckets is the bucket count N used for the G2B exchange. Zero
-	// defaults to defaultDigestBuckets (64); clamped to maxDigestBuckets.
+	// digestBuckets is the value WithDigestBuckets stores. The G2B handler
+	// does not read it: it answers at the count the requester sent, within
+	// digestBucketMin and digestBucketMax, so both sides digest over one
+	// bucket partition.
 	digestBuckets uint16
+
+	// digestBucketMin and digestBucketMax are the bucket counts the G2B
+	// handler answers, from WithDigestBucketBounds; digestBucketBounds reads
+	// them. Zero leaves each at the range the one-byte count field carries.
+	digestBucketMin, digestBucketMax uint16
 
 	// bucketRecords, when set, lets the G1 handler serve only the records in a
 	// peer's diverging buckets after a G2B mismatch. Auto-wired from the
@@ -293,9 +300,9 @@ type responderConfig struct {
 	// rumorTracker / rumorDedupFn / rumorApplyFn power the default G3
 	// handler. All three must be non-nil for G3 to be active; leaving
 	// any nil skips G3 frames (reading and discarding the body).
-	rumorTracker  *RumorTracker
-	rumorDedupFn  RumorIDFunc
-	rumorApplyFn  func([]byte) error
+	rumorTracker *RumorTracker
+	rumorDedupFn RumorIDFunc
+	rumorApplyFn func([]byte) error
 
 	// eventBus feeds SubscribeEvents listeners.
 	eventBus *eventBus
@@ -383,10 +390,23 @@ func WithBucketFingerprintProvider(bp BucketFingerprintProvider) EngineOption {
 	return func(e *Engine) { e.resp.bucketFingerprintProvider = bp }
 }
 
-// WithDigestBuckets sets the bucket count N for the G2B exchange. Zero keeps
-// the default (defaultDigestBuckets); values above maxDigestBuckets are clamped.
+// WithDigestBuckets stores a bucket count on the responder. The G2B handler
+// answers at the count the requester sent and does not read this value; the
+// counts it answers are set by WithDigestBucketBounds.
 func WithDigestBuckets(n uint16) EngineOption {
 	return func(e *Engine) { e.resp.digestBuckets = n }
+}
+
+// WithDigestBucketBounds sets the bucket counts the G2B handler answers: a
+// request of n buckets with min <= n <= max is digested at n, and any other is
+// refused before its body is read (ReadBucketDigestBodyIn), failing the frame
+// with no reply. The caller passes the bounds of the reconciliation profile its
+// session negotiated; loom's gossip responder passes its gossip.reconcile
+// profile's. A zero min reads as 1 and a zero max, or one above 256, as 256,
+// the range the one-byte count field carries; a min above max refuses every
+// request.
+func WithDigestBucketBounds(min, max uint16) EngineOption {
+	return func(e *Engine) { e.resp.digestBucketMin, e.resp.digestBucketMax = min, max }
 }
 
 // WithBucketRecordsProvider wires the bucket-scoped record source so the G1
@@ -680,6 +700,14 @@ func (c *responderConfig) emit(kind GossipEventKind, peerNodeID string) {
 	c.eventBus.emit(GossipEvent{Kind: kind, PeerNodeID: peerNodeID, Time: time.Now()})
 }
 
+// emitErr publishes an event carrying the error that caused it.
+func (c *responderConfig) emitErr(kind GossipEventKind, peerNodeID string, err error) {
+	if c.eventBus == nil {
+		return
+	}
+	c.eventBus.emit(GossipEvent{Kind: kind, PeerNodeID: peerNodeID, Err: err.Error(), Time: time.Now()})
+}
+
 // emitRecords publishes an event carrying a record count (e.g. the number of
 // diverging buckets for EventDigestBucketMismatch).
 func (c *responderConfig) emitRecords(kind GossipEventKind, peerNodeID string, records int) {
@@ -687,6 +715,20 @@ func (c *responderConfig) emitRecords(kind GossipEventKind, peerNodeID string, r
 		return
 	}
 	c.eventBus.emit(GossipEvent{Kind: kind, PeerNodeID: peerNodeID, Records: records, Time: time.Now()})
+}
+
+// digestBucketBounds returns the bucket counts the G2B handler answers, from
+// WithDigestBucketBounds with its zero and over-range values read as the
+// count field's own range [1, maxDigestBuckets].
+func (c *responderConfig) digestBucketBounds() (int, int) {
+	lo, hi := int(c.digestBucketMin), int(c.digestBucketMax)
+	if lo < 1 {
+		lo = 1
+	}
+	if hi == 0 || hi > maxDigestBuckets {
+		hi = maxDigestBuckets
+	}
+	return lo, hi
 }
 
 // divergingSet is the per-peer bucket-scoping the G2B handler stashes for the
@@ -778,10 +820,17 @@ type bucketDigestHandler struct {
 	cfg *responderConfig
 }
 
-// Handle implements FrameHandler.
+// Handle implements FrameHandler. A request whose count lies outside
+// digestBucketBounds fails the frame: its body is left unread, so the stream
+// cannot be read further, and no digest is computed or written.
 func (h *bucketDigestHandler) Handle(_ context.Context, conn net.Conn, peerNodeID string) FrameAction {
-	peerBuckets, _, err := ReadBucketDigestBody(conn)
+	lo, hi := h.cfg.digestBucketBounds()
+	peerBuckets, _, err := ReadBucketDigestBodyIn(conn, lo, hi)
 	if err != nil {
+		if errors.Is(err, ErrDigestBucketCount) {
+			h.cfg.emitErr(EventFrameError, peerNodeID, err)
+			return FrameFail
+		}
 		if h.cfg.classifyFatal(err) {
 			return FrameFail
 		}
@@ -795,7 +844,7 @@ func (h *bucketDigestHandler) Handle(_ context.Context, conn net.Conn, peerNodeI
 		return FrameContinue
 	}
 	// Match the peer's bucket count so the vectors are comparable index-for-index.
-	n := uint16(len(peerBuckets)) //nolint:gosec // bounded by maxDigestBuckets in ReadBucketDigestBody
+	n := uint16(len(peerBuckets)) //nolint:gosec // bounded by maxDigestBuckets in ReadBucketDigestBodyIn
 	local := h.cfg.bucketFingerprintProvider.BucketDigest(n)
 
 	// Reply with our own vector so the peer can localise its side of the
