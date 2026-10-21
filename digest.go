@@ -6,6 +6,7 @@ package whisper
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -83,10 +84,41 @@ func WriteBucketDigest(conn net.Conn, buckets []uint64, flags uint16) error {
 	return err
 }
 
+// ErrDigestBucketCount is the refusal of a G2B frame whose bucket count lies
+// outside the bounds its reader accepts. errors.Is matches it on a
+// *DigestBucketCountError.
+var ErrDigestBucketCount = errors.New("digest: bucket count outside the accepted bounds")
+
+// DigestBucketCountError names the count a G2B frame declared and the bounds
+// ReadBucketDigestBodyIn refused it against.
+type DigestBucketCountError struct {
+	Count, Min, Max int
+}
+
+func (e *DigestBucketCountError) Error() string {
+	return fmt.Sprintf("%v: %d buckets, accepted [%d,%d]", ErrDigestBucketCount, e.Count, e.Min, e.Max)
+}
+
+// Is lets errors.Is(err, ErrDigestBucketCount) match.
+func (e *DigestBucketCountError) Is(target error) bool { return target == ErrDigestBucketCount }
+
 // ReadBucketDigestBody reads a G2B frame after the 2-byte magic has already been
-// consumed by the multiplexer. The wire byte 0 decodes to 256 buckets (the
-// cap), so the returned slice length is always in [1, maxDigestBuckets].
+// consumed by the multiplexer, accepting every count the field carries. The
+// wire byte 0 decodes to 256 buckets (the cap), so the returned slice length is
+// always in [1, maxDigestBuckets].
 func ReadBucketDigestBody(r io.Reader) (buckets []uint64, flags uint16, err error) {
+	return ReadBucketDigestBodyIn(r, 1, maxDigestBuckets)
+}
+
+// ReadBucketDigestBodyIn reads a G2B frame body like ReadBucketDigestBody and
+// refuses, with a *DigestBucketCountError, a declared count outside [min, max]
+// before it allocates or reads the bucket values, so a peer cannot make the
+// reader buffer a body its reconciliation profile does not admit. The
+// bucketDigestHandler reads requests with the bounds WithDigestBucketBounds
+// set; a requester reads the reply with min = max = the count it sent, so the
+// two sides never compare digests over different bucket partitions. On a
+// refusal the body stays unread and the stream is no longer aligned.
+func ReadBucketDigestBodyIn(r io.Reader, min, max int) (buckets []uint64, flags uint16, err error) {
 	var hdr [3]byte // flags(2) + bucketCount(1)
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, 0, fmt.Errorf("digest: read bucket header: %w", err)
@@ -95,6 +127,9 @@ func ReadBucketDigestBody(r io.Reader) (buckets []uint64, flags uint16, err erro
 	n := int(hdr[2])
 	if n == 0 {
 		n = maxDigestBuckets // sentinel: 0 on the wire == 256 buckets
+	}
+	if n < min || n > max {
+		return nil, flags, &DigestBucketCountError{Count: n, Min: min, Max: max}
 	}
 	body := make([]byte, n*8)
 	if _, err := io.ReadFull(r, body); err != nil {
