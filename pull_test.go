@@ -8,8 +8,12 @@ package whisper
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -177,20 +181,100 @@ func TestReadPullRequestBody_TruncatedInput(t *testing.T) {
 	}
 }
 
-// Ensure pull magic doesn't collide with existing gossip magics.
+// whisperFrameMagic is one 2-byte frame magic the package defines: the
+// value its writer puts in the frame's first two bytes, and the value
+// Engine.RunResponder picks a handler by and consumeReconcileMagic checks.
+type whisperFrameMagic struct {
+	name  string // the constant's identifier
+	value uint16 // the constant
+	wire  uint16 // the value a peer writes and dispatches on; a change here changes both ends' wire
+}
+
+// whisperFrameMagics lists every frame magic in the package with the
+// value peers rely on. Engine.RunResponder dispatches on the magic alone,
+// looking each frame up in one handler map, so two frames sharing a value
+// would be read as each other.
+func whisperFrameMagics() []whisperFrameMagic {
+	return []whisperFrameMagic{
+		{"GossipMagic", GossipMagic, 0x4731},             // G1
+		{"DigestMagic", DigestMagic, 0x4732},             // G2
+		{"DigestBucketMagic", DigestBucketMagic, 0x4742}, // GB
+		{"RumorMagic", RumorMagic, 0x4733},               // G3
+		{"ReconcileMagic", ReconcileMagic, 0x4734},       // G4 reconcile
+		{"PullMagic", PullMagic, 0x4737},                 // bounded record pull
+		{"RumorACKMagic", RumorACKMagic, 0x4735},         // G5
+		{"SnapshotMagic", SnapshotMagic, 0x4736},         // G6
+	}
+}
+
+// TestPullMagic_NoCollision fails when any two whisper frame magics
+// share a value, when a magic is not the value its peers expect, or when
+// the package defines a frame magic this list does not name.
 func TestPullMagic_NoCollision(t *testing.T) {
-	if PullMagic == GossipMagic {
-		t.Errorf("PullMagic collides with GossipMagic (G1): 0x%x", PullMagic)
+	magics := whisperFrameMagics()
+	for i := range magics {
+		for j := i + 1; j < len(magics); j++ {
+			if magics[i].value == magics[j].value {
+				t.Errorf("%s and %s share magic 0x%04X", magics[i].name, magics[j].name, magics[i].value)
+			}
+		}
+		if magics[i].value != magics[i].wire {
+			t.Errorf("%s: got 0x%04X, want 0x%04X", magics[i].name, magics[i].value, magics[i].wire)
+		}
 	}
-	if PullMagic == DigestMagic {
-		t.Errorf("PullMagic collides with DigestMagic (G2): 0x%x", PullMagic)
+
+	listed := make(map[string]bool, len(magics))
+	for _, m := range magics {
+		listed[m.name] = true
 	}
-	if PullMagic == RumorMagic {
-		t.Errorf("PullMagic collides with RumorMagic (G3): 0x%x", PullMagic)
+	for _, name := range packageMagicConsts(t) {
+		if !listed[name] {
+			t.Errorf("%s is a frame magic missing from whisperFrameMagics, so no collision check covers it", name)
+		}
 	}
-	if PullMagic != 0x4734 {
-		t.Errorf("PullMagic: got 0x%x, want 0x4734 (G4)", PullMagic)
+}
+
+// packageMagicConsts returns the name of every package-level constant in
+// the package's non-test sources whose identifier ends in "Magic": the
+// naming every frame magic in this package carries. Reading the sources
+// keeps TestPullMagic_NoCollision from passing over a magic added later.
+func packageMagicConsts(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob package sources: %v", err)
 	}
-	// Silence unused-import in case formatting moves things around.
-	_ = fmt.Sprintf
+	fset := token.NewFileSet()
+	seen := map[string]bool{}
+	var names []string
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, f, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		if file.Name.Name != "whisper" {
+			continue
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				for _, id := range spec.(*ast.ValueSpec).Names {
+					if strings.HasSuffix(id.Name, "Magic") && !seen[id.Name] {
+						seen[id.Name] = true
+						names = append(names, id.Name)
+					}
+				}
+			}
+		}
+	}
+	if len(names) == 0 {
+		t.Fatal("no frame magic constants found in the package sources")
+	}
+	return names
 }
