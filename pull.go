@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Pull-based gossip (G4) — the dual of G1 push-delta. A peer with a
+// Pull-based gossip — the dual of G1 push-delta. A peer with a
 // stale watermark for some topic explicitly asks a neighbour for records
 // newer than that watermark, instead of waiting for the next adaptive-
 // interval G1 tick.
@@ -29,9 +29,9 @@ import (
 //  3. Diagnostic pulls — operator tooling can pull from any peer for
 //     on-demand LAD state without disturbing the peer's gossip cadence.
 //
-// Wire format (G4 request):
+// Wire format (pull request):
 //
-//	[2-byte magic 0x4734]
+//	[2-byte magic 0x4737]
 //	[1-byte topicLen]
 //	[topicLen-byte topic]
 //	[8-byte sinceWatermark — unix nanoseconds, 0 = full sync]
@@ -42,7 +42,13 @@ import (
 // handler via HandlePullRequest — the package provides the wire-format
 // primitives and per-peer rate-limiting hooks only, not an opinion on
 // the payload shape.
-const PullMagic uint16 = 0x4734 // "G4"
+//
+// PullMagic is "G7" in ASCII. Engine.RunResponder picks a frame's handler
+// by its magic alone and consumeReconcileMagic accepts a frame by its
+// magic alone, so it differs from every other whisper frame magic, the
+// G4 reconcile frame's ReconcileMagic included; TestPullMagic_NoCollision
+// checks every pair.
+const PullMagic uint16 = 0x4737
 
 // pullRequestHeaderTail is everything after the 2-byte magic and
 // variable-length topic field: 1-byte topicLen (already consumed before
@@ -60,14 +66,14 @@ const MaxPullTopicLen = 255
 // larger-payload channel than the push path.
 const DefaultPullResponseMaxSize uint32 = 1 << 20
 
-// PullRequest is the decoded form of a G4 PULL_REQUEST frame.
+// PullRequest is the decoded form of a pull request frame.
 type PullRequest struct {
 	Topic           string    // topic to pull
 	SinceWatermark  time.Time // records strictly newer than this; zero = full sync
 	MaxResponseSize uint32    // responder-side cap (bytes); 0 = use DefaultPullResponseMaxSize
 }
 
-// WritePullRequest writes a G4 pull request frame to conn. Counterpart
+// WritePullRequest writes a pull request frame to conn. Counterpart
 // of ReadPullRequestBody (which expects the caller to have consumed the
 // 2-byte magic already, matching the responder's multiplexer contract
 // used by G1/G2/G3).
@@ -91,7 +97,7 @@ func WritePullRequest(conn net.Conn, req PullRequest) error {
 	return err
 }
 
-// ReadPullRequestBody reads the body of a G4 frame after the 2-byte
+// ReadPullRequestBody reads the body of a pull request frame after the 2-byte
 // magic has been consumed by the responder multiplexer. Symmetric with
 // ReadGossipBody / ReadDigestBody / ReadRumorBody.
 func ReadPullRequestBody(r io.Reader) (PullRequest, error) {
