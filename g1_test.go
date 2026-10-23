@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -137,14 +138,15 @@ func TestG1NativeHandler_RoundTrip(t *testing.T) {
 	_ = store.Apply([]byte("local-rec-A"))
 	_ = store.Apply([]byte("local-rec-B"))
 
-	var obsCalls int
-	var obsApplied int
+	// The observer runs on the responder's goroutine while the test reads
+	// its counts from its own, so both are atomics.
+	var obsCalls, obsApplied atomic.Int32
 	engine := NewEngine(
 		WithG1Store(store),
 		WithG1Codec(jsonG1Codec{}),
 		WithG1ExchangeObserver(func(res GossipResult, _ string) {
-			obsCalls++
-			obsApplied = res.RecordsApplied
+			obsCalls.Add(1)
+			obsApplied.Store(int32(res.RecordsApplied))
 		}),
 	)
 
@@ -185,14 +187,14 @@ func TestG1NativeHandler_RoundTrip(t *testing.T) {
 
 	// Wait briefly for the observer (runs inline after write — should
 	// already have fired, but observability via a pipe can race).
-	for i := 0; i < 50 && obsCalls == 0; i++ {
+	for i := 0; i < 50 && obsCalls.Load() == 0; i++ {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if obsCalls == 0 {
+	if obsCalls.Load() == 0 {
 		t.Fatal("exchange observer never fired")
 	}
-	if obsApplied != 1 {
-		t.Errorf("expected observer to see 1 applied record, got %d", obsApplied)
+	if got := obsApplied.Load(); got != 1 {
+		t.Errorf("expected observer to see 1 applied record, got %d", got)
 	}
 
 	// The store should now contain the original two plus the remote record.
