@@ -173,6 +173,13 @@ type DecodeResult struct {
 	Positive []Key // count == +1 cells (encoder-only elements)
 	Negative []Key // count == -1 cells (receiver-only elements)
 	Complete bool  // true when peel-decode terminated with all cells empty
+	// Poisoned is true when the peel removed more elements than the table
+	// has cells. In a table built by Insert and Subtract a peeled cell is
+	// left empty and is never pure again, so a decode peels at most one
+	// element per cell; a cell written with a key that is not in every cell
+	// the key hashes to is re-made pure by its own removal, and the peel
+	// would run without end. The decode stops there with Complete false.
+	Poisoned bool
 }
 
 // Decode performs peel-decode on the (possibly post-Subtract) table.
@@ -180,15 +187,24 @@ type DecodeResult struct {
 // cells with count==0 and zero key-sum, the decode is complete and
 // the symmetric difference is fully recovered. Otherwise the
 // difference exceeds the table's capacity and the caller should
-// retry with a larger table or fall back to G1 + watermark.
+// retry with a larger table or fall back to G1 + watermark. The work
+// is bounded by the cell count: a table whose cells are not a
+// consistent sketch (DecodeResult.Poisoned) ends the peel rather than
+// holding the decoder.
 func (t *IBLT) Decode() DecodeResult {
 	res := DecodeResult{}
+	peels := 0
 	for {
 		progress := false
 		for i := range t.cells {
 			c := &t.cells[i]
 			if c.Count == 1 || c.Count == -1 {
 				if hashKey(c.KeySum) == c.KeyHashSum {
+					peels++
+					if peels > len(t.cells) {
+						res.Poisoned = true
+						return res
+					}
 					if c.Count == 1 {
 						res.Positive = append(res.Positive, c.KeySum)
 						t.Delete(c.KeySum)

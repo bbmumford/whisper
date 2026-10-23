@@ -47,6 +47,17 @@ const (
 	ReconcileRateless
 )
 
+// ErrReconcileMode is the refusal of a table frame whose mode byte names
+// neither ReconcileRate15 nor ReconcileRateless. The two modes are the only
+// sizing rules computeCellCount has; RunResponderRound returns it before it
+// builds a table or writes a reply, so an incoherent mode selects nothing.
+var ErrReconcileMode = errors.New("reconcile: table names a mode this build does not have")
+
+// valid reports whether m is one of the two modes.
+func (m ReconcileMode) valid() bool {
+	return m == ReconcileRate15 || m == ReconcileRateless
+}
+
 // ReconcileFlags is the per-frame flag byte in the G4 body header.
 // Distinguishes the three frame variants:
 //
@@ -375,9 +386,15 @@ func (d *ReconcileDriver) RunInitiatorRound(nodeID string, timeout time.Duration
 // the body bytes. Builds the symmetric difference and writes back
 // the reply + request frames.
 func (d *ReconcileDriver) RunResponderRound(conn net.Conn, body []byte) error {
-	encTable, _, err := d.codec.DecodeTable(body)
+	encTable, mode, err := d.codec.DecodeTable(body)
 	if err != nil {
 		return fmt.Errorf("reconcile: responder decode table: %w", err)
+	}
+	if encTable == nil {
+		return errors.New("reconcile: responder decode table: codec returned no table")
+	}
+	if !mode.valid() {
+		return fmt.Errorf("%w: mode %d", ErrReconcileMode, mode)
 	}
 
 	// Build our own table over the same parameters and subtract.
