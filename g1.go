@@ -169,6 +169,11 @@ func (h *g1Handler) Handle(ctx context.Context, conn net.Conn, peerNodeID string
 	// piggyback + backpressure signal), then delta-or-full record set
 	// per the DeltaTracker's per-peer watermark.
 	meta := h.buildOutboundMeta(peerNodeID)
+	// The peer's next watermark is the moment its records are selected, not
+	// the end of the reply: a record stored after this point is not in the
+	// reply, and a store that filters Delta on its own store time (RecordSet)
+	// must still return it on the next exchange with this peer.
+	selectedAt := time.Now()
 	records := h.selectOutboundRecords(peerNodeID)
 	result.RecordsSent = len(records)
 
@@ -205,7 +210,7 @@ func (h *g1Handler) Handle(ctx context.Context, conn net.Conn, peerNodeID string
 	_ = exchangeStart
 
 	if h.g1.delta != nil && peerNodeID != "" {
-		h.g1.delta.UpdateWatermark(peerNodeID, time.Now())
+		h.g1.delta.UpdateWatermark(peerNodeID, selectedAt)
 	}
 	if h.g1.observer != nil {
 		h.g1.observer(result, peerNodeID)

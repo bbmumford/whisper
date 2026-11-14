@@ -340,6 +340,12 @@ func (e *Engine) Run(ctx context.Context, conn net.Conn, peerNodeID string, onEx
 		case <-time.After(interval):
 		}
 
+		// exchangeAt becomes the peer's watermark: ExchangeFunc selects the
+		// records it sends after this point, so a record stored while the
+		// exchange runs falls at or after the watermark and is in the next
+		// Delta rather than in neither.
+		exchangeAt := time.Now()
+
 		// Each iteration runs in its own scope so `defer e.backpressure.Exit()`
 		// fires at the end of the iteration instead of accumulating on the
 		// goroutine's defer stack until Run returns. The previous shape
@@ -391,7 +397,7 @@ func (e *Engine) Run(ctx context.Context, conn net.Conn, peerNodeID string, onEx
 
 		// Update delta tracker
 		if e.delta != nil && peerNodeID != "" {
-			e.delta.UpdateWatermark(peerNodeID, time.Now())
+			e.delta.UpdateWatermark(peerNodeID, exchangeAt)
 		}
 
 		// Adapt interval based on result
