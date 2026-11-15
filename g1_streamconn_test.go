@@ -142,8 +142,8 @@ func TestG1NativeHandler_OverStreamConn(t *testing.T) {
 	streamA, streamB := newFakeStreamPair(0)
 	connInit := adapter.NewStreamConn(streamA)
 	connResp := adapter.NewStreamConn(streamB)
-	defer streamA.Close()
-	defer streamB.Close()
+	defer func() { _ = streamA.Close() }()
+	defer func() { _ = streamB.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -244,8 +244,8 @@ func TestG1NativeHandler_RepeatedExchangesOverStreamConn(t *testing.T) {
 	streamA, streamB := newFakeStreamPair(0)
 	connInit := adapter.NewStreamConn(streamA)
 	connResp := adapter.NewStreamConn(streamB)
-	defer streamA.Close()
-	defer streamB.Close()
+	defer func() { _ = streamA.Close() }()
+	defer func() { _ = streamB.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

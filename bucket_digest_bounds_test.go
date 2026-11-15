@@ -38,8 +38,8 @@ func (c *countingBucketFP) BucketDigest(n uint16) []uint64 {
 func runBucketExchange(t *testing.T, h *bucketDigestHandler, n int) (FrameAction, []uint64, error) {
 	t.Helper()
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	type reply struct {
 		vec []uint64

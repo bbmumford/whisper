@@ -151,8 +151,8 @@ func TestG1NativeHandler_RoundTrip(t *testing.T) {
 	)
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -220,8 +220,8 @@ func TestG1NativeHandler_DigestMatchSkipsG1(t *testing.T) {
 	engine.SubscribeEvents(events)
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -280,8 +280,8 @@ func TestG1NativeHandler_MaxPayloadEnforced(t *testing.T) {
 	)
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

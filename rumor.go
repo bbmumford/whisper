@@ -525,7 +525,7 @@ func (rp *RumorPusher) handleAckTimeout(pr *pendingRumor) {
 	// Try a different dimension than the original (pr.dimension).
 	// Cube.RouteRumor(pr.dimension) returns dimensions > pr.dimension;
 	// we want any other dimension we haven't tried.
-	var altDim uint8 = pr.dimension
+	altDim := pr.dimension
 	if cube != nil {
 		for _, d := range cube.RouteRumor(0) {
 			if uint8(d) != pr.dimension {

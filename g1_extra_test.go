@@ -85,8 +85,8 @@ func TestG1_StoreFingerprintFeedsG2(t *testing.T) {
 	)
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -126,8 +126,8 @@ func TestG1_SeenIDTrackingPassesThroughCodec(t *testing.T) {
 	)
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -184,8 +184,8 @@ func TestG1_SeenIDTrackingDisabledDropsIDs(t *testing.T) {
 	)
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -230,8 +230,8 @@ func TestG1_KeepaliveZeroLengthIgnored(t *testing.T) {
 	)
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()

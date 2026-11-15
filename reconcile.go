@@ -619,17 +619,6 @@ func consumeReconcileMagic(conn net.Conn) error {
 	return nil
 }
 
-// mustEncode wraps encoding helpers that return (body, err) so
-// inline error-discarding fits the responder's flow. Empty bodies
-// are valid for both reply and request (means "nothing to send").
-func mustEncode[T any](fn func(T) ([]byte, error), arg T) []byte {
-	body, err := fn(arg)
-	if err != nil {
-		return nil
-	}
-	return body
-}
-
 // reconcileHandler is the engine's built-in G4 frame handler. The
 // outer responder loop has already consumed the [magic] prefix; we
 // read [length][flags][body] and dispatch a TableFrame into the

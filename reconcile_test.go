@@ -196,8 +196,8 @@ func TestReconcileRoundTrip(t *testing.T) {
 	driverB := NewReconcileDriver(codec, storeB, nil)
 
 	connA, connB := net.Pipe()
-	defer connA.Close()
-	defer connB.Close()
+	defer func() { _ = connA.Close() }()
+	defer func() { _ = connB.Close() }()
 
 	driverA.RegisterPeer(&ReconcilePeer{NodeID: "B", Conn: connA})
 	driverB.RegisterPeer(&ReconcilePeer{NodeID: "A", Conn: connB})

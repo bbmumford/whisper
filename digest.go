@@ -61,7 +61,6 @@ func ReadDigestBody(r io.Reader) (fingerprint uint64, flags uint16, err error) {
 // buckets, so there is no oversize case to reject.
 const DigestBucketMagic uint16 = 0x4742 // "GB" — distinct from DigestMagic 0x4732
 const maxDigestBuckets = 256            // hard cap; bounds the frame to 256*8 + hdr bytes
-const defaultDigestBuckets uint16 = 64  // default N: 64*8 = 512-byte digest, ~1/64 localisation
 
 // WriteBucketDigest writes a G2B frame carrying one 64-bit digest per bucket.
 // len(buckets) must be in [1, maxDigestBuckets]; 256 is encoded as the wire
