@@ -7,12 +7,12 @@ require google.golang.org/protobuf v1.36.11
 require golang.org/x/time v0.15.0
 
 require (
-	github.com/gobwas/httphead v0.1.0 // indirect
-	github.com/gobwas/pool v0.2.1 // indirect
-	github.com/gobwas/ws v1.4.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260319201613-d00831a3d3e7 // indirect
-	google.golang.org/grpc v1.79.3 // indirect
+	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/golang/protobuf v1.5.4 // indirect
+	github.com/pion/dtls/v2 v2.2.7 // indirect
+	github.com/pion/logging v0.2.4 // indirect
+	github.com/pion/stun v0.6.1 // indirect
+	github.com/pion/transport/v2 v2.2.1 // indirect
 )
 
 require (
@@ -34,5 +34,3 @@ require (
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
 )
-
-replace github.com/ORBTR/aether => ../aether
