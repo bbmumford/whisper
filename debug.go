@@ -76,5 +76,5 @@ var (
 	dbgHypercube  = newDebug("whisper.hypercube")
 	dbgRumor      = newDebug("whisper.rumor")
 	dbgPeer       = newDebug("whisper.peer")
-	dbgSync       = newDebug("whisper.sync")
+	dbgSync       = newDebug("whisper.sync") //nolint:unused // the whisper.sync DEBUG subsystem's logger, declared beside the other subsystems for sync-path diagnostics
 )

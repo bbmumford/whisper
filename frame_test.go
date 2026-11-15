@@ -48,8 +48,8 @@ func TestRegisterFrameKind_CustomHandler(t *testing.T) {
 	}
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -86,8 +86,8 @@ func TestRegisterFrameKind_DuplicateRejected(t *testing.T) {
 func TestRunResponder_UnknownMagic(t *testing.T) {
 	engine := NewEngine()
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -113,8 +113,8 @@ func TestRunResponder_EventBus(t *testing.T) {
 	WithFingerprintProvider(fixedFingerprint(0xAABB))(engine)
 
 	a, b := newPipeConns()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()

@@ -371,12 +371,12 @@ func TestARecordTheStoreRefusesMutatesNothingAndCountsNothing(t *testing.T) {
 	store := &refusingStore{fakeReconcileStore: fakeReconcileStore{records: map[iblt.Key][]byte{}}}
 	seed := make([]byte, 32)
 	seed[0] = 0x11
-	store.fakeReconcileStore.put(seed)
+	store.put(seed)
 	d := NewReconcileDriver(codec, store, nil)
 
 	connA, connB := net.Pipe()
-	defer connA.Close()
-	defer connB.Close()
+	defer func() { _ = connA.Close() }()
+	defer func() { _ = connB.Close() }()
 	d.RegisterPeer(&ReconcilePeer{NodeID: "hostile", Conn: connA})
 
 	poison := make([]byte, 32)

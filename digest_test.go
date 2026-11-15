@@ -15,8 +15,8 @@ import (
 func TestDigestWriteRead(t *testing.T) {
 	// Use a pipe as a net.Conn
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	fp := uint64(0xDEADBEEF12345678)
 	flags := FlagDigestMatch
@@ -54,8 +54,8 @@ func TestDigestWriteRead(t *testing.T) {
 func TestDigestFrameSize(t *testing.T) {
 	// Use a pipe — write on one end, count bytes on the other
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	done := make(chan int, 1)
 	go func() {
@@ -86,8 +86,8 @@ func TestBucketDigestWriteRead(t *testing.T) {
 			flags := uint16(0x55AA)
 
 			server, client := net.Pipe()
-			defer server.Close()
-			defer client.Close()
+			defer func() { _ = server.Close() }()
+			defer func() { _ = client.Close() }()
 
 			errc := make(chan error, 1)
 			go func() { errc <- WriteBucketDigest(client, buckets, flags) }()
@@ -125,7 +125,7 @@ func TestBucketDigestWriteRead(t *testing.T) {
 // before touching the connection.
 func TestBucketDigestRejectsBadCount(t *testing.T) {
 	_, client := net.Pipe()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := WriteBucketDigest(client, nil, 0); err == nil {
 		t.Error("WriteBucketDigest(0 buckets) must error")
 	}

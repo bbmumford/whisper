@@ -36,8 +36,8 @@ func TestBucketDigestHandler_ComputesDivergingSet(t *testing.T) {
 	h := &bucketDigestHandler{cfg: cfg}
 
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	initVec := []uint64{1, 2, 99, 4, 5, 6, 7, 8} // differs from respVec at index 2
 	replyc := make(chan []uint64, 1)
@@ -116,8 +116,8 @@ func TestBucketDigestHandler_NoDivergenceStoresNothing(t *testing.T) {
 	h := &bucketDigestHandler{cfg: cfg}
 
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 
 	errc := make(chan error, 1)
 	go func() {
