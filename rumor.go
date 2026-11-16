@@ -8,6 +8,7 @@ import (
 	"container/list"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -29,11 +30,22 @@ const RumorMagic uint16 = 0x4733 // "G3"
 const rumorHeaderSize = 8        // 2 (magic) + 4 (length) + 1 (hop) + 1 (fromDimension)
 const rumorSeenCapacity = 4096
 
-// MaxRumorPayloadBytes caps the size of a payload admitted into the rumor
-// inbound queue. Oversized payloads are dropped with a warning — they still
-// propagate through the delta (G1) path; rumor fast-push is best-effort and
-// must not pin large slices alive in the bounded inbound channel.
+// MaxRumorPayloadBytes is the one bound on a G3 rumor payload, on every path a
+// rumor takes: NotifyNewPayload drops a larger payload before it enters the
+// bounded inbound queue, PushRumor, PushRumorExcluding and WriteRumor send none
+// to any peer, and ReadRumorBody refuses a frame whose stated length exceeds it
+// before allocating or reading the body. A larger payload still propagates
+// through the delta (G1) path; rumor fast-push is best-effort and must not pin
+// large slices alive in the bounded inbound channel.
 const MaxRumorPayloadBytes = 256 * 1024
+
+// ErrRumorPayloadTooLarge is the refusal of a rumor payload past
+// MaxRumorPayloadBytes. ReadRumorBody returns it, wrapped, having read only the
+// frame's header, so the stream it read from is no longer aligned on a frame:
+// the responder's rumor handler ends the stream on it whatever the fatal-error
+// classifier says, and HandleRumorFrame returns it for its caller to do the same.
+// WriteRumor returns it having written nothing.
+var ErrRumorPayloadTooLarge = errors.New("whisper: rumor payload exceeds MaxRumorPayloadBytes")
 
 // rumorInboundCapacity bounds the NotifyNewPayload queue. Senders are
 // already fanout-limited, so a small queue is sufficient and keeps the
@@ -153,8 +165,13 @@ func (rt *RumorTracker) ShouldForward(hopCount uint8) bool {
 // WriteRumor writes a G3 rumor frame to conn. The payload is opaque bytes
 // that the consumer has already serialised. Uses net.Buffers to hand the
 // header and payload to the OS writev path (where supported), avoiding
-// the per-send copy into a merged buffer.
+// the per-send copy into a merged buffer. A payload past MaxRumorPayloadBytes
+// is refused with ErrRumorPayloadTooLarge before any byte is written, since
+// every reader refuses the frame.
 func WriteRumor(conn net.Conn, payload []byte, hopCount uint8, fromDimension uint8) error {
+	if len(payload) > MaxRumorPayloadBytes {
+		return fmt.Errorf("rumor: write %d bytes: %w", len(payload), ErrRumorPayloadTooLarge)
+	}
 	var hdr [rumorHeaderSize]byte
 	binary.BigEndian.PutUint16(hdr[0:2], RumorMagic)
 	binary.BigEndian.PutUint32(hdr[2:6], uint32(len(payload)))
@@ -166,7 +183,10 @@ func WriteRumor(conn net.Conn, payload []byte, hopCount uint8, fromDimension uin
 }
 
 // ReadRumorBody reads the remaining bytes of a G3 frame after the 2-byte magic
-// has been consumed by the multiplexer. Returns the opaque payload bytes.
+// has been consumed by the multiplexer. Returns the opaque payload bytes. A
+// stated length past MaxRumorPayloadBytes is refused with
+// ErrRumorPayloadTooLarge after the 6-byte header and before the body is
+// allocated or read.
 func ReadRumorBody(r io.Reader) (payload []byte, hopCount uint8, fromDimension uint8, err error) {
 	var hdr [6]byte // 4 (length) + 1 (hop) + 1 (fromDim)
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -176,8 +196,8 @@ func ReadRumorBody(r io.Reader) (payload []byte, hopCount uint8, fromDimension u
 	hopCount = hdr[4]
 	fromDimension = hdr[5]
 
-	if payloadLen > maxGossipPayload {
-		return nil, 0, 0, fmt.Errorf("rumor: payload too large (%d bytes)", payloadLen)
+	if payloadLen > MaxRumorPayloadBytes {
+		return nil, 0, 0, fmt.Errorf("rumor: payload of %d bytes: %w", payloadLen, ErrRumorPayloadTooLarge)
 	}
 	payload = make([]byte, payloadLen)
 	if _, err := io.ReadFull(r, payload); err != nil {
@@ -650,7 +670,14 @@ func (rp *RumorPusher) PushRumorExcluding(payload []byte, hopCount uint8, fromDi
 	rp.pushRumorInternal(payload, hopCount, fromDimension, excludeNodeID)
 }
 
+// pushRumorInternal is the one egress of PushRumor and PushRumorExcluding. A
+// payload past MaxRumorPayloadBytes is dropped before any peer is chosen,
+// written, tracked for an ACK or counted, since every reader refuses it.
 func (rp *RumorPusher) pushRumorInternal(payload []byte, hopCount uint8, fromDimension uint8, excludeNodeID string) {
+	if len(payload) > MaxRumorPayloadBytes {
+		dbgRumor.Printf("pushRumor: dropping oversized rumor payload (%d > %d bytes)", len(payload), MaxRumorPayloadBytes)
+		return
+	}
 	rp.mu.RLock()
 	cube := rp.cube
 	cubeExt := rp.cubeExt
@@ -853,17 +880,24 @@ func adaptiveFanout(peerCount, baseFanout int) int {
 // Called from the responder multiplexer after the 2-byte magic is consumed.
 // senderNodeID is excluded from forwarding to prevent back-propagation.
 // applyFn is the consumer's function to apply the payload to local state.
-func HandleRumorFrame(r io.Reader, tracker *RumorTracker, pusher *RumorPusher, senderNodeID string, rumorIDFn RumorIDFunc, applyFn func([]byte) error) {
+//
+// It returns ReadRumorBody's error, and nothing is marked seen, applied or
+// forwarded for that frame. The caller ends the stream on a non-nil error: a read
+// that failed part way, or an oversize length (ErrRumorPayloadTooLarge) whose
+// body was never read, leaves r on no frame boundary, so a next frame read from
+// it would be read out of the rejected body's bytes. An apply error is logged
+// and is not returned.
+func HandleRumorFrame(r io.Reader, tracker *RumorTracker, pusher *RumorPusher, senderNodeID string, rumorIDFn RumorIDFunc, applyFn func([]byte) error) error {
 	payload, hopCount, fromDim, err := ReadRumorBody(r)
 	if err != nil {
 		dbgRumor.Printf("Responder: rumor read error: %v", err)
-		return
+		return err
 	}
 
 	rumorID := rumorIDFn(payload)
 	if tracker.IsSeen(rumorID) {
 		dbgRumor.Printf("Responder: rumor duplicate, dropping")
-		return
+		return nil
 	}
 	tracker.MarkSeen(rumorID)
 
@@ -881,4 +915,5 @@ func HandleRumorFrame(r io.Reader, tracker *RumorTracker, pusher *RumorPusher, s
 	}
 
 	dbgRumor.Printf("Responder: rumor applied and forwarded (hop=%d)", hopCount)
+	return nil
 }

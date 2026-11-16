@@ -893,6 +893,11 @@ func (h *rumorACKHandler) Handle(_ context.Context, conn net.Conn, peerNodeID st
 
 // rumorHandler is the built-in G3 handler — wraps HandleRumorFrame
 // with the configured dedup fn + apply fn.
+//
+// A read refused with ErrRumorPayloadTooLarge fails the frame whatever the
+// fatal-error classifier answers: ReadRumorBody read only the header, so the
+// next bytes on the stream are the refused body and no next frame can be read
+// from them.
 type rumorHandler struct {
 	cfg    *responderConfig
 	engine *Engine
@@ -904,7 +909,7 @@ func (h *rumorHandler) Handle(_ context.Context, conn net.Conn, peerNodeID strin
 		// No rumor handler configured — consume the body and drop so
 		// the stream stays aligned for subsequent frames.
 		if _, _, _, err := ReadRumorBody(conn); err != nil {
-			if h.cfg.classifyFatal(err) {
+			if errors.Is(err, ErrRumorPayloadTooLarge) || h.cfg.classifyFatal(err) {
 				return FrameFail
 			}
 		}
@@ -915,7 +920,7 @@ func (h *rumorHandler) Handle(_ context.Context, conn net.Conn, peerNodeID strin
 	// apply for the ACK write-back.
 	payload, hopCount, fromDim, err := ReadRumorBody(conn)
 	if err != nil {
-		if h.cfg.classifyFatal(err) {
+		if errors.Is(err, ErrRumorPayloadTooLarge) || h.cfg.classifyFatal(err) {
 			return FrameFail
 		}
 		return FrameContinue
