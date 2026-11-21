@@ -31,6 +31,21 @@ const snapshotHeaderSize = 6
 // the stream's available credit and this cap.
 const snapshotMaxPayload uint32 = 1 << 20
 
+// snapshotBatchMaxRecords is the most records one shard chunk can carry: a chunk rides in one G5
+// frame body of at most snapshotMaxPayload bytes, and each record of its batch takes at least its
+// 4-byte length after the batch's 4-byte count. fetchShardSequential refuses a chunk batch that
+// declares more, so a codec whose DecodeShardChunk returns a body larger than its frame still cannot
+// size an allocation past what one frame carries.
+const snapshotBatchMaxRecords = (uint64(snapshotMaxPayload) - 4) / 4
+
+// ErrSnapshotBatchMalformed is the refusal of a record batch ([count][len][record]...) whose count
+// passes what its bytes can hold or the batch bound it is read under, or one of whose records runs
+// past its bytes. decodeRecordBatch returns it, wrapped, before allocating anything for the declared
+// records, and no record of a refused batch is applied: fetchShardSequential returns it and ends that
+// neighbour's shard transfer, and ReedSolomonErasure.DecodeErasure returns it for the shard holding
+// the batch.
+var ErrSnapshotBatchMalformed = errors.New("whisper: snapshot record batch is malformed")
+
 // SnapshotFrameKind discriminates the four frame types in the G5
 // protocol. Each frame starts with [magic][length] common header
 // then a one-byte kind discriminator.
@@ -447,7 +462,10 @@ func (d *SnapshotDriver) fetchShardSequential(conn net.Conn, idx, count uint8) (
 		if err != nil {
 			continue
 		}
-		records := unpackBatch(chunk.Body)
+		records, err := decodeRecordBatch(chunk.Body, snapshotBatchMaxRecords)
+		if err != nil {
+			return applied, fmt.Errorf("snapshot: shard %d chunk %d: %w", idx, chunk.ChunkIndex, err)
+		}
 		for _, r := range records {
 			if d.store.Apply(r) == nil {
 				applied++
@@ -595,27 +613,39 @@ func (h *snapshotHandler) Handle(_ context.Context, conn net.Conn, peerNodeID st
 	return FrameContinue
 }
 
-// unpackBatch deserialises a chunk body produced by packBatch.
-func unpackBatch(body []byte) [][]byte {
-	if len(body) < 4 {
-		return nil
+// decodeRecordBatch reads the batch layout packBatch and packShardRecords write:
+// [count uint32][len uint32][record][len uint32][record]... An empty buf is an empty batch. The count
+// is checked before anything is allocated for it: each record takes at least its 4-byte length, so a
+// count above (len(buf)-4)/4, or above maxRecords, is refused with ErrSnapshotBatchMalformed, and so is
+// a buf too short to hold the count or a record whose length runs past buf. Bytes after the last
+// record are ignored, because a reconstructed shard is zero-padded to the longest shard's length.
+// Lengths are compared as uint64, so a large stated length cannot wrap the bound on a 32-bit build.
+func decodeRecordBatch(buf []byte, maxRecords uint64) ([][]byte, error) {
+	if len(buf) == 0 {
+		return nil, nil
 	}
-	count := binary.BigEndian.Uint32(body[0:4])
+	if len(buf) < 4 {
+		return nil, fmt.Errorf("snapshot: %d-byte batch holds no count: %w", len(buf), ErrSnapshotBatchMalformed)
+	}
+	count := uint64(binary.BigEndian.Uint32(buf[0:4]))
+	if count > uint64(len(buf)-4)/4 || count > maxRecords {
+		return nil, fmt.Errorf("snapshot: %d-byte batch declares %d records: %w", len(buf), count, ErrSnapshotBatchMalformed)
+	}
 	out := make([][]byte, 0, count)
 	off := 4
-	for i := uint32(0); i < count; i++ {
-		if off+4 > len(body) {
-			break
+	for i := uint64(0); i < count; i++ {
+		if len(buf)-off < 4 {
+			return nil, fmt.Errorf("snapshot: batch record %d holds no length: %w", i, ErrSnapshotBatchMalformed)
 		}
-		ln := binary.BigEndian.Uint32(body[off : off+4])
+		ln := uint64(binary.BigEndian.Uint32(buf[off : off+4]))
 		off += 4
-		if off+int(ln) > len(body) {
-			break
+		if ln > uint64(len(buf)-off) {
+			return nil, fmt.Errorf("snapshot: batch record %d of %d bytes runs past the batch: %w", i, ln, ErrSnapshotBatchMalformed)
 		}
 		rec := make([]byte, ln)
-		copy(rec, body[off:off+int(ln)])
+		copy(rec, buf[off:off+int(ln)])
 		out = append(out, rec)
 		off += int(ln)
 	}
-	return out
+	return out, nil
 }

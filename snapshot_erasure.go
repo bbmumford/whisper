@@ -8,6 +8,7 @@ package whisper
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/klauspost/reedsolomon"
 )
@@ -114,7 +115,10 @@ func (ReedSolomonErasure) EncodeErasure(dataShards [][][]byte, parityCount int) 
 // DecodeErasure reconstructs the original k data shards from any
 // k-of-n shards. Missing shards in the input MUST be nil entries
 // (their inner slice empty or the outer entry nil). The output is
-// the first k reconstructed shards as record-byte-slice slices.
+// the first k reconstructed shards as record-byte-slice slices. A data
+// shard whose record batch is malformed is refused with
+// ErrSnapshotBatchMalformed before anything is allocated for its
+// declared records, and no shard is returned.
 func (ReedSolomonErasure) DecodeErasure(shards [][][]byte, k int) ([][][]byte, error) {
 	n := len(shards)
 	if n == 0 {
@@ -165,10 +169,16 @@ func (ReedSolomonErasure) DecodeErasure(shards [][][]byte, k int) ([][][]byte, e
 		}
 	}
 
-	// Unpack each data shard back into its constituent records.
+	// Unpack each data shard back into its constituent records. A
+	// reconstructed shard spans every chunk of its shard, so no frame bound
+	// applies to its count; the shard's own bytes bound it.
 	out := make([][][]byte, k)
 	for i := 0; i < k; i++ {
-		out[i] = unpackShardRecords(flat[i])
+		recs, err := decodeRecordBatch(flat[i], math.MaxUint32)
+		if err != nil {
+			return nil, fmt.Errorf("erasure: data shard %d: %w", i, err)
+		}
+		out[i] = recs
 	}
 	return out, nil
 }
@@ -191,31 +201,4 @@ func packShardRecords(records [][]byte) []byte {
 		off += len(r)
 	}
 	return buf
-}
-
-// unpackShardRecords deserialises a packed shard buffer back into
-// its records, ignoring trailing zero padding past the records'
-// declared lengths.
-func unpackShardRecords(buf []byte) [][]byte {
-	if len(buf) < 4 {
-		return nil
-	}
-	count := binary.BigEndian.Uint32(buf[0:4])
-	out := make([][]byte, 0, count)
-	off := 4
-	for i := uint32(0); i < count; i++ {
-		if off+4 > len(buf) {
-			return out
-		}
-		ln := binary.BigEndian.Uint32(buf[off : off+4])
-		off += 4
-		if off+int(ln) > len(buf) {
-			return out
-		}
-		rec := make([]byte, ln)
-		copy(rec, buf[off:off+int(ln)])
-		out = append(out, rec)
-		off += int(ln)
-	}
-	return out
 }
