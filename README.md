@@ -75,6 +75,31 @@ In production use by the HSTLES mesh directory gossip across `bootstrap.hstles.c
 
 ---
 
+## Gossip exchange
+
+Each topic is registered with a `TopicConfig` (`Engine.RegisterTopic`):
+
+| Field | Meaning |
+|-------|---------|
+| `Mode` | `BroadcastOnly`: pub/sub with nothing stored or merged. `StatefulMerge`: records kept in a `StateStore` and kept in step by delta sync. `RequestResponse`: a query answered by a handler; nothing stored. |
+| `Store` | the topic's `StateStore`; required for `StatefulMerge` |
+| `Handler` | the topic's `TopicHandler`; required for `RequestResponse` |
+| `TTL` | how long a `BroadcastOnly` message lives (0: no expiry) |
+| `Rumor` | whether a `StatefulMerge` mutation is also pushed at once as a rumor |
+| `Priority` | dispatch priority under egress pressure (higher is preferred) |
+
+A `StateStore` is the consumer's side of a stateful topic: `Fingerprint()` (a 64-bit summary that changes on every mutation), `Snapshot()`, `Delta(since)` and `Apply(record)`. Whisper moves opaque record bytes; merge, tombstone and last-writer-wins rules belong to the store. `TopicHandler.OnMessage` receives a topic's messages and, for `RequestResponse`, returns the reply.
+
+`Engine.Run` drives one peer connection as the initiator and `Engine.RunResponder` as the responder. `Publish` sends on a topic and `Subscribe` adds a `Subscriber`. `Query` runs a `RequestResponse` topic's handler and returns its reply; it answers from the local handler only and does not yet solicit other peers.
+
+Every frame starts with a 2-byte magic:
+
+- **G2 digest probe** (`0x4732`): before a full exchange the initiator sends a 12-byte frame holding its store fingerprint, and the responder answers with its own. Equal fingerprints end the round with no records sent. When they differ, the initiator can escalate to a bucketed digest (G2B, `0x4742`) that narrows the divergence to a few key-prefix buckets.
+- **G1 full exchange** (`0x4731`, then a 4-byte length): each side sends an `ExchangeMeta` and the records changed since its per-peer watermark (the whole snapshot when it has none), and each applies what it receives.
+- **G3 rumor push** (`0x4733`): one record pushed to neighbours at once and forwarded dimension by dimension over the hypercube overlay. `BroadcastOnly` topics travel only this way.
+
+---
+
 ## Consumer Examples
 
 ```go
