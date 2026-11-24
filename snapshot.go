@@ -352,7 +352,7 @@ func (d *SnapshotDriver) probeManifests(neighbors []net.Conn) (map[int]SnapshotM
 				results <- probeResult{idx: idx, err: err}
 				return
 			}
-			kind, body, err := readSnapshotFrame(c)
+			kind, body, err := readSnapshotReply(c)
 			if err != nil {
 				results <- probeResult{idx: idx, err: err}
 				return
@@ -451,7 +451,7 @@ func (d *SnapshotDriver) fetchShardSequential(conn net.Conn, idx, count uint8) (
 		return 0, err
 	}
 	for {
-		kind, body, err := readSnapshotFrame(conn)
+		kind, body, err := readSnapshotReply(conn)
 		if err != nil {
 			return applied, err
 		}
@@ -528,8 +528,35 @@ func writeSnapshotFrame(conn net.Conn, kind SnapshotFrameKind, body []byte) erro
 	return nil
 }
 
-// readSnapshotFrame assumes [magic] has been consumed by the
-// engine's frame multiplexer; reads [length][kind][body].
+// readSnapshotReply reads one frame a responder wrote back to the initiator,
+// [magic][length][kind][body] as writeSnapshotFrame writes every frame. No
+// engine multiplexer sits in front of the initiator's connection, so the
+// initiator consumes the magic itself (consumeSnapshotMagic) before
+// readSnapshotFrame reads the rest.
+func readSnapshotReply(conn net.Conn) (SnapshotFrameKind, []byte, error) {
+	if err := consumeSnapshotMagic(conn); err != nil {
+		return 0, nil, err
+	}
+	return readSnapshotFrame(conn)
+}
+
+// consumeSnapshotMagic reads and checks the 2-byte SnapshotMagic prefix,
+// refusing any other value, so a misordered or foreign frame is a protocol
+// error rather than a length read from the wrong bytes.
+func consumeSnapshotMagic(conn net.Conn) error {
+	var magicBuf [2]byte
+	if _, err := io.ReadFull(conn, magicBuf[:]); err != nil {
+		return err
+	}
+	if got := binary.BigEndian.Uint16(magicBuf[:]); got != SnapshotMagic {
+		return fmt.Errorf("snapshot: bad magic 0x%04x (want 0x%04x)", got, SnapshotMagic)
+	}
+	return nil
+}
+
+// readSnapshotFrame assumes [magic] has been consumed, by the engine's frame
+// multiplexer on the responder or by readSnapshotReply on the initiator; reads
+// [length][kind][body].
 func readSnapshotFrame(conn net.Conn) (SnapshotFrameKind, []byte, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {

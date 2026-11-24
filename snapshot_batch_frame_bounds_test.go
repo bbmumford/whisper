@@ -58,9 +58,8 @@ func (s *countingStore) Snapshot() ([][]byte, uint64, uint64) { return nil, 0, 0
 func (s *countingStore) Apply([]byte) error                   { s.applied++; return nil }
 
 // answerShardRequest plays the neighbour of one shard fetch: it reads the initiator's shard
-// request frame ([magic][length][kind][body]) and answers with one shard frame laid out as the
-// initiator's readSnapshotFrame reads it ([length][kind][body]), carrying chunkBody as the only,
-// final chunk of shard 0.
+// request frame ([magic][length][kind][body]) and answers, as a responder does, with one shard
+// frame writeSnapshotFrame writes, carrying chunkBody as the only, final chunk of shard 0.
 func answerShardRequest(t *testing.T, peer net.Conn, chunkBody []byte) {
 	t.Helper()
 	go func() {
@@ -73,11 +72,7 @@ func answerShardRequest(t *testing.T, peer net.Conn, chunkBody []byte) {
 			return
 		}
 		frame, _ := batchTestCodec{}.EncodeShardChunk(SnapshotChunk{ShardIndex: 0, ChunkIndex: 0, TotalChunks: 1, Body: chunkBody})
-		var lenBuf [4]byte
-		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(frame)+1))
-		_, _ = peer.Write(lenBuf[:])
-		_, _ = peer.Write([]byte{byte(SnapshotKindShard)})
-		_, _ = peer.Write(frame)
+		_ = writeSnapshotFrame(peer, SnapshotKindShard, frame)
 	}()
 }
 
