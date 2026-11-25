@@ -11,17 +11,35 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    env:
+      # Whether the release App can be used here: a step's condition cannot
+      # read a secret, so the job states it once.
+      HAS_RELEASE_APP: ${{ vars.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
     steps:
+      # A token from the release App makes release-please's pull requests start
+      # their checks and its tags start the tag-triggered workflows, as anyone's
+      # would. Without the App's key the workflow token is used instead.
+      - name: Mint the release App's token for this repository
+        id: app
+        if: env.HAS_RELEASE_APP == 'true'
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - uses: googleapis/release-please-action@v4
         id: release
         with:
+          token: ${{ steps.app.outputs.token || github.token }}
           config-file: .github/release-please-config.json
           manifest-file: .github/.release-please-manifest.json
 
-      # A tag pushed with this workflow's token starts no other workflow, so
-      # the new release's quality checks and docs are started here.
+      # A tag pushed with the workflow token starts no other workflow, so without
+      # the App the new release's checks and docs are started here. A tag the
+      # App's token pushed has started them already, so this step does not run
+      # then and each release runs them once.
       - name: Run the release and docs workflows on the new tag
-        if: ${{ steps.release.outputs.release_created }}
+        if: ${{ steps.release.outputs.release_created && steps.app.outputs.token == '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag_name }}
