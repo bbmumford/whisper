@@ -47,7 +47,7 @@ func TestSnapshotBatchRefusalsAreTyped(t *testing.T) {
 		"three bytes, no count":     {0, 0, 1},
 		"count with no length room": noLengthRoom,
 	} {
-		refused(t, "shard fetch, "+name, func() error { _, err, _ := fetchOneShard(t, body); return err })
+		refused(t, "shard fetch, "+name, func() error { _, _, err := fetchOneShard(t, body); return err })
 		refused(t, "erasure decode, "+name, func() error {
 			_, err := (ReedSolomonErasure{}).DecodeErasure([][][]byte{{body}}, 1)
 			return err
@@ -138,6 +138,13 @@ func pipePair(t *testing.T) (initiator, peer net.Conn) {
 	deadline := time.Now().Add(10 * time.Second)
 	_ = initiator.SetDeadline(deadline)
 	_ = peer.SetDeadline(deadline)
-	t.Cleanup(func() { initiator.Close(); peer.Close() })
+	t.Cleanup(func() {
+		if err := initiator.Close(); err != nil {
+			t.Errorf("initiator.Close: %v", err)
+		}
+		if err := peer.Close(); err != nil {
+			t.Errorf("peer.Close: %v", err)
+		}
+	})
 	return initiator, peer
 }

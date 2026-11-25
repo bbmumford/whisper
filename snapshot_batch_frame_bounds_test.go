@@ -77,12 +77,20 @@ func answerShardRequest(t *testing.T, peer net.Conn, chunkBody []byte) {
 }
 
 // fetchOneShard runs the initiator's shard fetch against a neighbour answering with chunkBody and
-// reports what it applied, its error, and the bytes the heap allocated while it ran.
-func fetchOneShard(t *testing.T, chunkBody []byte) (applied int, err error, allocated uint64) {
+// reports what it applied, the bytes the heap allocated while it ran, and its error.
+func fetchOneShard(t *testing.T, chunkBody []byte) (applied int, allocated uint64, err error) {
 	t.Helper()
 	initiator, peer := net.Pipe()
-	defer initiator.Close()
-	defer peer.Close()
+	defer func() {
+		if err := initiator.Close(); err != nil {
+			t.Errorf("initiator.Close: %v", err)
+		}
+	}()
+	defer func() {
+		if err := peer.Close(); err != nil {
+			t.Errorf("peer.Close: %v", err)
+		}
+	}()
 	_ = initiator.SetDeadline(time.Now().Add(10 * time.Second))
 	_ = peer.SetDeadline(time.Now().Add(10 * time.Second))
 	store := &countingStore{}
@@ -97,7 +105,7 @@ func fetchOneShard(t *testing.T, chunkBody []byte) (applied int, err error, allo
 	if n != store.applied {
 		t.Fatalf("fetch reported %d applied, store saw %d", n, store.applied)
 	}
-	return n, err, after.TotalAlloc - before.TotalAlloc
+	return n, after.TotalAlloc - before.TotalAlloc, err
 }
 
 // A neighbour's chunk that declares far more records than its body can hold is refused before
@@ -106,7 +114,7 @@ func fetchOneShard(t *testing.T, chunkBody []byte) (applied int, err error, allo
 func TestSnapshotShardRefusesACountItsBodyCannotHold(t *testing.T) {
 	body := make([]byte, 8) // count, then 4 bytes: room for one empty record at most
 	binary.BigEndian.PutUint32(body[0:4], 1<<22)
-	applied, err, allocated := fetchOneShard(t, body)
+	applied, allocated, err := fetchOneShard(t, body)
 	if allocated > 1<<20 {
 		t.Errorf("decoding an %d-byte chunk allocated %d bytes: the count sized the allocation", len(body), allocated)
 	}
@@ -123,7 +131,7 @@ func TestSnapshotShardRefusesACountItsBodyCannotHold(t *testing.T) {
 func TestSnapshotShardRefusesARecordPastItsBody(t *testing.T) {
 	body := packBatch([][]byte{[]byte("first"), []byte("second")})
 	binary.BigEndian.PutUint32(body[4+4+5:], 1<<20) // the second record's length now runs past the body
-	applied, err, _ := fetchOneShard(t, body)
+	applied, _, err := fetchOneShard(t, body)
 	if err == nil {
 		t.Fatal("a chunk whose second record runs past its body was accepted")
 	}

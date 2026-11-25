@@ -33,8 +33,16 @@ func TestRunInitiatorFetchesTheSnapshotAWhisperResponderServes(t *testing.T) {
 	served := &recordStore{records: [][]byte{[]byte("one"), []byte("two"), []byte("three")}}
 	engine := NewEngine(WithSnapshot(NewSnapshotDriver(batchTestCodec{}, served, nil)))
 	initiatorConn, responderConn := net.Pipe()
-	defer initiatorConn.Close()
-	defer responderConn.Close()
+	defer func() {
+		if err := initiatorConn.Close(); err != nil {
+			t.Errorf("initiatorConn.Close: %v", err)
+		}
+	}()
+	defer func() {
+		if err := responderConn.Close(); err != nil {
+			t.Errorf("responderConn.Close: %v", err)
+		}
+	}()
 	_ = initiatorConn.SetDeadline(time.Now().Add(10 * time.Second))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -59,8 +67,16 @@ func TestRunInitiatorFetchesTheSnapshotAWhisperResponderServes(t *testing.T) {
 // its length is read.
 func TestTheInitiatorRefusesAReplyWithoutTheSnapshotMagic(t *testing.T) {
 	initiator, peer := net.Pipe()
-	defer initiator.Close()
-	defer peer.Close()
+	defer func() {
+		if err := initiator.Close(); err != nil {
+			t.Errorf("initiator.Close: %v", err)
+		}
+	}()
+	defer func() {
+		if err := peer.Close(); err != nil {
+			t.Errorf("peer.Close: %v", err)
+		}
+	}()
 	_ = initiator.SetDeadline(time.Now().Add(5 * time.Second))
 	go func() {
 		var hdr [snapshotHeaderSize]byte
